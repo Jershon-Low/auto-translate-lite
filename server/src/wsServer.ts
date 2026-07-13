@@ -39,28 +39,32 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
   let deepgramConnection: DeepgramConnection | null = null;
 
   ws.on('message', (data, isBinary) => {
-    if (!isBinary) {
-      const message = JSON.parse(data.toString());
-      if (message.type === 'start') {
-        deps.session.start();
-        deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
-          onFinalSegment: (text) => {
-            void handleFinalSegment(text, deps, ws);
-          },
-          onError: () => {
-            ws.send(JSON.stringify({ type: 'status', status: 'error' }));
-          },
-          onClose: () => {},
-        });
-        ws.send(JSON.stringify({ type: 'status', status: 'recording' }));
-      } else if (message.type === 'stop') {
-        deps.session.stop();
-        deepgramConnection?.finish();
-        deepgramConnection = null;
-        ws.send(JSON.stringify({ type: 'status', status: 'idle' }));
+    try {
+      if (!isBinary) {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'start') {
+          deps.session.start();
+          deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
+            onFinalSegment: (text) => {
+              void handleFinalSegment(text, deps, ws);
+            },
+            onError: () => {
+              ws.send(JSON.stringify({ type: 'status', status: 'error' }));
+            },
+            onClose: () => {},
+          });
+          ws.send(JSON.stringify({ type: 'status', status: 'recording' }));
+        } else if (message.type === 'stop') {
+          deps.session.stop();
+          deepgramConnection?.finish();
+          deepgramConnection = null;
+          ws.send(JSON.stringify({ type: 'status', status: 'idle' }));
+        }
+      } else if (deepgramConnection) {
+        deepgramConnection.send(data as Buffer);
       }
-    } else if (deepgramConnection) {
-      deepgramConnection.send(data as Buffer);
+    } catch (error) {
+      console.error('Error handling capture message:', error);
     }
   });
 
@@ -106,27 +110,33 @@ async function handleFinalSegment(
 function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
   ws.on('message', (data) => {
     void (async () => {
-      const message = JSON.parse(data.toString());
-      if (message.type === 'subscribe') {
-        const language = message.language as string;
-        deps.session.addViewer(ws, language);
+      try {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'subscribe') {
+          const language = message.language as string;
 
-        const backlog = deps.session.buffer.getRecent();
-        if (backlog.length === 0) {
-          ws.send(JSON.stringify({ type: 'backlog', lines: [] }));
-          return;
+          const backlog = deps.session.buffer.getRecent();
+          if (backlog.length === 0) {
+            ws.send(JSON.stringify({ type: 'backlog', lines: [] }));
+            deps.session.addViewer(ws, language);
+            return;
+          }
+
+          const translations = await translateBacklog(
+            deps.geminiClient,
+            backlog.map((line) => line.english),
+            language
+          );
+          const lines = backlog.map((line, index) => ({
+            english: line.english,
+            translated: translations[index] ?? '',
+          }));
+          ws.send(JSON.stringify({ type: 'backlog', lines }));
+          deps.session.addViewer(ws, language);
         }
-
-        const translations = await translateBacklog(
-          deps.geminiClient,
-          backlog.map((line) => line.english),
-          language
-        );
-        const lines = backlog.map((line, index) => ({
-          english: line.english,
-          translated: translations[index] ?? '',
-        }));
-        ws.send(JSON.stringify({ type: 'backlog', lines }));
+      } catch (error) {
+        console.error('Error handling viewer message:', error);
+        ws.send(JSON.stringify({ type: 'backlog', lines: [] }));
       }
     })();
   });

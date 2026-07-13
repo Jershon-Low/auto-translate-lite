@@ -98,4 +98,78 @@ describe('wsServer', () => {
     captureSocket.close();
     viewerSocket.close();
   });
+
+  it('survives a malformed non-binary frame instead of crashing the connection', async () => {
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    await waitForOpen(captureSocket);
+
+    // Malformed JSON must not throw uncaught inside the message handler.
+    captureSocket.send('not valid json {{{');
+
+    // The connection should still be usable afterward.
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    const status = await waitForMessage(captureSocket);
+    expect(status).toEqual({ type: 'status', status: 'recording' });
+
+    captureSocket.close();
+  });
+
+  it('does not fan out a live caption to a viewer until its backlog has been sent', async () => {
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    await waitForOpen(captureSocket);
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+
+    session.buffer.append('Earlier line', Date.now());
+
+    let resolveBacklog!: (value: { text: string }) => void;
+    const pendingBacklog = new Promise<{ text: string }>((resolve) => {
+      resolveBacklog = resolve;
+    });
+    let notifyBacklogStarted!: () => void;
+    const backlogStarted = new Promise<void>((resolve) => {
+      notifyBacklogStarted = resolve;
+    });
+    (geminiClient.models.generateContent as any).mockImplementationOnce(() => {
+      notifyBacklogStarted();
+      return pendingBacklog;
+    });
+
+    const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+    await waitForOpen(viewerSocket);
+
+    const messages: any[] = [];
+    viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+    viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+    // Wait until the subscribe handler has actually started translating the
+    // backlog (i.e. it has already taken its buffer snapshot synchronously),
+    // so the ordering below is deterministic rather than tick-count dependent.
+    await backlogStarted;
+
+    // A new final segment arrives while the backlog translation is still in flight.
+    // The viewer must not be registered yet, so it should receive nothing yet.
+    capturedCallbacks!.onFinalSegment('Should not jump the queue');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(messages).toEqual([]);
+
+    resolveBacklog({ text: '{"translations":["较早的一行"]}' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(messages).toEqual([
+      { type: 'backlog', lines: [{ english: 'Earlier line', translated: '较早的一行' }] },
+    ]);
+
+    const captionPromise = waitForMessage(viewerSocket);
+    capturedCallbacks!.onFinalSegment('Now the viewer is registered');
+    const caption = await captionPromise;
+    expect(caption).toEqual({
+      type: 'caption',
+      english: 'Now the viewer is registered',
+      translated: '你好',
+    });
+
+    captureSocket.close();
+    viewerSocket.close();
+  });
 });
