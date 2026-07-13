@@ -2,7 +2,7 @@
 
 ## Context
 
-Auto Translate Lite pipes live sermon speech through Deepgram (English STT) into Gemini (`translateSegment`) and pushes the result straight to viewer WebSocket connections with no accuracy check beyond a plain retry-on-API-failure. A prior incident at another church's translation service inverted "Jesus loves you" into "Jesus doesn't love you" in the target language — a single bad model output went live with nobody able to catch it. This is unacceptable for theological content.
+Auto Translate Lite pipes live sermon speech through Deepgram (English STT) into Gemini (`translateSegment`) and pushes the result straight to viewer WebSocket connections with no accuracy check beyond a plain retry-on-API-failure. A single bad model output can go live with nobody able to catch it, which is unacceptable for theological content.
 
 This spec adds safeguards to reduce the chance of a meaning-inverting or theologically damaging mistranslation reaching viewers, given two hard constraints:
 
