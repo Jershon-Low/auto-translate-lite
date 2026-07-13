@@ -104,12 +104,15 @@ async function handleFinalSegment(
   const activeLanguages = deps.session.getActiveLanguages();
   if (activeLanguages.length === 0) return;
 
+  const recentLines = deps.session.buffer.getRecent();
+  const precedingContext = recentLines.slice(-4, -1).map((recentLine) => recentLine.english);
+
   let translations: Record<string, string>;
   try {
-    translations = await translateSegment(deps.geminiClient, english, activeLanguages);
+    translations = await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext);
   } catch {
     try {
-      translations = await translateSegment(deps.geminiClient, english, activeLanguages);
+      translations = await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext);
     } catch (secondError) {
       console.error('Translation failed after retry, skipping segment:', secondError);
       return;

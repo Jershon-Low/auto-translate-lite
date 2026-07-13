@@ -95,6 +95,38 @@ describe('wsServer', () => {
     viewerSocket.close();
   });
 
+  it('includes up to the last 3 preceding lines as translation context', async () => {
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    await waitForOpen(captureSocket);
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+
+    const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+    await waitForOpen(viewerSocket);
+    viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+    await waitForMessage(viewerSocket); // backlog: []
+
+    session.buffer.append('First line', Date.now());
+    session.buffer.append('Second line', Date.now());
+    session.buffer.append('Third line', Date.now());
+    session.buffer.append('Fourth line', Date.now());
+
+    const captionPromise = waitForMessage(viewerSocket);
+    capturedCallbacks!.onFinalSegment('Fifth line');
+    await captionPromise;
+
+    const translateCall = (geminiClient.models.generateContent as any).mock.calls.find(
+      (call: any) => !call[0].contents.includes('safety checker')
+    );
+    expect(translateCall[0].contents).toContain('Second line');
+    expect(translateCall[0].contents).toContain('Third line');
+    expect(translateCall[0].contents).toContain('Fourth line');
+    expect(translateCall[0].contents).not.toContain('First line');
+
+    captureSocket.close();
+    viewerSocket.close();
+  });
+
   it('sends translated backlog to a viewer joining after segments already arrived', async () => {
     const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
     await waitForOpen(captureSocket);
