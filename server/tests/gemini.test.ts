@@ -22,6 +22,15 @@ describe('translateSegment', () => {
     expect(result).toEqual({});
     expect(client.models.generateContent).not.toHaveBeenCalled();
   });
+
+  it('includes Australian slang context and polarity-preservation guidance in the prompt', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    await translateSegment(client, "G'day mate, no worries", ['zh']);
+
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.contents).toContain('Australian slang');
+    expect(call.contents).toContain('Preserve polarity and negation exactly');
+  });
 });
 
 describe('translateBacklog', () => {
@@ -36,5 +45,14 @@ describe('translateBacklog', () => {
     const result = await translateBacklog(client, [], 'zh');
     expect(result).toEqual([]);
     expect(client.models.generateContent).not.toHaveBeenCalled();
+  });
+
+  it('includes Australian slang context and polarity-preservation guidance in the prompt', async () => {
+    const client = fakeClient('{"translations":["你好"]}');
+    await translateBacklog(client, ["G'day mate, no worries"], 'zh');
+
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.contents).toContain('Australian slang');
+    expect(call.contents).toContain('Preserve polarity and negation exactly');
   });
 });
