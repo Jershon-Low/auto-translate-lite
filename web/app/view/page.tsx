@@ -3,6 +3,8 @@
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useViewerSocket } from '@/lib/useViewerSocket';
+import { exportTranscriptPdf } from '@/lib/exportTranscriptPdf';
+import { TARGET_LANGUAGES } from '@/lib/languages';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001';
 
@@ -15,6 +17,8 @@ function ViewerPageContent() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const autoScrollRef = useRef(true);
   const [showJumpButton, setShowJumpButton] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!language) {
@@ -43,6 +47,20 @@ function ViewerPageContent() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }
 
+  async function handleExportPdf() {
+    setExportError(null);
+    setIsExporting(true);
+    try {
+      const languageLabel =
+        TARGET_LANGUAGES.find((entry) => entry.code === language)?.label ?? language;
+      await exportTranscriptPdf(lines, language, languageLabel);
+    } catch {
+      setExportError("Couldn't generate PDF — try again");
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
   if (!language) return null;
 
   return (
@@ -54,10 +72,20 @@ function ViewerPageContent() {
           {status === 'live' && lines.length === 0 && 'Waiting for the service to start…'}
           {status === 'live' && lines.length > 0 && 'Live'}
         </span>
-        <a href="/?reset=1" className="underline">
-          Change language
-        </a>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={handleExportPdf}
+            disabled={lines.length === 0 || isExporting}
+            className="underline disabled:opacity-50 disabled:no-underline"
+          >
+            {isExporting ? 'Generating…' : 'Download Transcript (PDF)'}
+          </button>
+          <a href="/?reset=1" className="underline">
+            Change language
+          </a>
+        </div>
       </div>
+      {exportError && <p className="px-3 pt-2 text-sm text-destructive">{exportError}</p>}
       <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-4">
         {lines.map((line, index) => (
           <div key={index}>
