@@ -172,7 +172,31 @@ function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
             english: line.english,
             translated: translations[index] ?? '',
           }));
-          ws.send(JSON.stringify({ type: 'backlog', lines }));
+
+          const verificationItems: VerificationItem[] = lines
+            .map((line, index) => ({ line, index }))
+            .filter(({ line }) => line.translated.length > 0)
+            .map(({ line, index }) => ({ id: String(index), english: line.english, translated: line.translated }));
+          const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems);
+
+          const verifiedLines = lines.map((line, index) => {
+            if (line.translated.length === 0) return line;
+            const verification = verifications[String(index)];
+            if (verification?.safe === true) return line;
+            console.warn(
+              JSON.stringify({
+                event: 'translation_fallback',
+                timestamp: new Date().toISOString(),
+                language,
+                english: line.english,
+                discardedTranslation: line.translated,
+                reason: verification?.reason ?? 'verification unavailable',
+              })
+            );
+            return { english: line.english, translated: line.english };
+          });
+
+          ws.send(JSON.stringify({ type: 'backlog', lines: verifiedLines }));
           deps.session.addViewer(ws, language);
         }
       } catch (error) {

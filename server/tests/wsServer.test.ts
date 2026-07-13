@@ -8,12 +8,22 @@ import type { DeepgramCallbacks } from '../src/deepgram';
 
 function fakeGeminiClient(overrides: { translate?: string; verify?: string } = {}): GeminiClient {
   const translateText = overrides.translate ?? '{"zh":"你好"}';
-  const verifyText = overrides.verify ?? '{"zh":{"safe":true,"reason":"ok"}}';
   return {
     models: {
       generateContent: vi.fn().mockImplementation((params: { contents: string }) => {
         if (params.contents.includes('safety checker')) {
-          return Promise.resolve({ text: verifyText });
+          if (overrides.verify) {
+            return Promise.resolve({ text: overrides.verify });
+          }
+          // Default: mark every requested id as safe, regardless of whether the
+          // caller used language-keyed ids (live captions) or index-keyed ids
+          // (backlog lines).
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) {
+            result[id] = { safe: true, reason: 'ok' };
+          }
+          return Promise.resolve({ text: JSON.stringify(result) });
         }
         return Promise.resolve({ text: translateText });
       }),
@@ -242,6 +252,38 @@ describe('wsServer', () => {
     expect(caption).toEqual({ type: 'caption', english: 'Hello everyone', translated: 'Hello everyone' });
     expect(verifyCallCount).toBe(2);
 
+    captureSocket.close();
+    viewerSocket.close();
+  });
+
+  it('falls back to English in the backlog when the verifier flags a line as unsafe', async () => {
+    (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+      if (params.contents.includes('safety checker')) {
+        return Promise.resolve({ text: '{"0":{"safe":false,"reason":"polarity flip"}}' });
+      }
+      return Promise.resolve({ text: '{"translations":["耶稣不爱你"]}' });
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    await waitForOpen(captureSocket);
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+
+    session.buffer.append('Jesus loves you', Date.now());
+
+    const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+    await waitForOpen(viewerSocket);
+    viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+    const backlogMessage = await waitForMessage(viewerSocket);
+
+    expect(backlogMessage).toEqual({
+      type: 'backlog',
+      lines: [{ english: 'Jesus loves you', translated: 'Jesus loves you' }],
+    });
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('translation_fallback'));
+
+    warnSpy.mockRestore();
     captureSocket.close();
     viewerSocket.close();
   });
