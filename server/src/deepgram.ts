@@ -36,6 +36,7 @@ export function createDeepgramConnection(
     interim_results: true,
     encoding: 'opus',
     mimetype: 'audio/webm',
+    keyterm: ['Planetshakers'],
   });
 
   connection.on(LiveTranscriptionEvents.Transcript, (data: DeepgramTranscriptEvent) => {
