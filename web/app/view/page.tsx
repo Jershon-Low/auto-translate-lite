@@ -46,7 +46,7 @@ function ViewerPageContent() {
   if (!language) return null;
 
   return (
-    <main className="min-h-screen bg-background text-foreground flex flex-col">
+    <main className="h-dvh bg-background text-foreground flex flex-col">
       <div className="p-3 text-sm text-muted-foreground flex justify-between items-center border-b">
         <span>
           {status === 'connecting' && 'Connecting…'}
