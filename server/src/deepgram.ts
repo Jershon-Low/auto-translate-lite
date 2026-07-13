@@ -30,7 +30,7 @@ export function createDeepgramConnection(
 ): DeepgramConnection {
   const deepgram = createClient(apiKey);
   const connection = deepgram.listen.live({
-    model: 'nova-2',
+    model: 'nova-3',
     language: 'en',
     smart_format: true,
     interim_results: true,
