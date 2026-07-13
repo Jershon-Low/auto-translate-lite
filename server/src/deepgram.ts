@@ -107,22 +107,27 @@ export function createDeepgramConnection(
     language: 'en',
     smart_format: true,
     interim_results: true,
+    utterance_end_ms: 1000,
     encoding: 'opus',
     mimetype: 'audio/webm',
     keyterm: ['Planetshakers'],
   });
 
-  connection.on(LiveTranscriptionEvents.Transcript, (data: DeepgramTranscriptEvent) => {
-    const finalText = extractFinalTranscript(data);
-    if (finalText) callbacks.onFinalSegment(finalText);
-  });
+  const router = createUtteranceRouter(callbacks.onFinalSegment);
 
+  connection.on(LiveTranscriptionEvents.Transcript, (data: DeepgramTranscriptEvent) => {
+    router.handleTranscriptEvent(data);
+  });
+  connection.on(LiveTranscriptionEvents.UtteranceEnd, () => router.handleUtteranceEnd());
   connection.on(LiveTranscriptionEvents.Error, (error: Error) => callbacks.onError(error));
   connection.on(LiveTranscriptionEvents.Close, () => callbacks.onClose());
 
   return {
     send: (data: Buffer) => connection.send(data as unknown as ArrayBufferLike),
-    finish: () => connection.finish(),
+    finish: () => {
+      router.flushRemaining();
+      connection.finish();
+    },
   };
 }
 
