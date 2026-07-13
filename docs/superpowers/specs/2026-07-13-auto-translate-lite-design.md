@@ -94,8 +94,8 @@ Each caption line carries both the original English segment and its translation 
 
 ## Tech Stack
 
-- **Backend**: Node.js + TypeScript, `ws` (WebSocket), Express for serving the capture/viewer pages, Deepgram Node SDK, Gemini API SDK (structured/JSON output mode).
-- **Frontend**: plain browser JS/TS for both capture and viewer pages (no framework needed at this scale).
+- **Backend**: Node.js + TypeScript, a dedicated `ws` WebSocket server (audio ingest from the capture page, transcript/translation fan-out to viewers), Deepgram Node SDK, Gemini API SDK (structured/JSON output mode). Kept as its own process rather than folded into Next.js, since persistent WebSocket connections don't fit Next.js's request lifecycle (and would block a future move to serverless hosting).
+- **Frontend**: Next.js (landing/language-picker, capture page, viewer caption page) styled with shadcn/ui, so the theme (colors, dark mode, typography) can be matched to Planetshakers' existing branding via shadcn's CSS-variable theming. Client components connect directly to the WebSocket server for realtime data; Next.js itself doesn't handle the socket.
 - **Hosting**: small cloud VPS. Since nothing is provisioned yet, the implementation plan will include setup guidance for the VPS, domain, Deepgram API key, and Gemini API key.
 
 ## Future Extensions (explicitly out of scope now)
