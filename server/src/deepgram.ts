@@ -47,7 +47,7 @@ export function createDeepgramConnection(
   connection.on(LiveTranscriptionEvents.Close, () => callbacks.onClose());
 
   return {
-    send: (data: Buffer) => connection.send(data),
+    send: (data: Buffer) => connection.send(data as unknown as ArrayBufferLike),
     finish: () => connection.finish(),
   };
 }

@@ -6,7 +6,7 @@ export interface GeminiClient {
       model: string;
       contents: string;
       config: { responseMimeType: string; responseSchema: Record<string, unknown> };
-    }): Promise<{ text: string | null }>;
+    }): Promise<{ text: string | null | undefined }>;
   };
 }
 
