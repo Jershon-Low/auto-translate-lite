@@ -14,7 +14,7 @@ export function createGeminiClient(apiKey: string): GeminiClient {
   return new GoogleGenAI({ apiKey });
 }
 
-const MODEL = 'gemini-2.5-flash';
+const MODEL = 'gemini-flash-latest';
 
 export async function translateSegment(
   client: GeminiClient,
