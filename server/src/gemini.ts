@@ -16,10 +16,20 @@ export function createGeminiClient(apiKey: string): GeminiClient {
 
 const MODEL = 'gemini-3.1-flash-lite';
 
+function buildContextBlock(precedingContext: string[]): string {
+  if (precedingContext.length === 0) return '';
+  const numbered = precedingContext.map((line, index) => `${index + 1}. "${line}"`).join('\n');
+  return `For context, here are the immediately preceding sentences from the same sermon (do not translate these — they're for reference only, e.g. to resolve pronouns or match terminology):
+${numbered}
+
+`;
+}
+
 export async function translateSegment(
   client: GeminiClient,
   englishText: string,
-  languageCodes: string[]
+  languageCodes: string[],
+  precedingContext: string[] = []
 ): Promise<Record<string, string>> {
   if (languageCodes.length === 0) return {};
 
@@ -34,7 +44,7 @@ This is an Australian church, so expect Australian slang, idioms, jokes, and dry
 
 Preserve polarity and negation exactly. Never invert a positive statement into a negative one, or vice versa. Don't add, remove, or reinterpret theological meaning — when unsure, translate literally rather than paraphrasing. Take care with how God, Jesus, the Holy Spirit, and Scripture are referred to and what is said about them.
 
-Sentence: "${englishText}"`,
+${buildContextBlock(precedingContext)}Sentence: "${englishText}"`,
     config: {
       responseMimeType: 'application/json',
       responseSchema: { type: 'object', properties, required: languageCodes },

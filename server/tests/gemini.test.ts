@@ -31,6 +31,29 @@ describe('translateSegment', () => {
     expect(call.contents).toContain('Australian slang');
     expect(call.contents).toContain('Preserve polarity and negation exactly');
   });
+
+  it('includes preceding context as reference-only lines when provided', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    await translateSegment(client, 'How are you', ['zh'], ['Hello everyone', 'Welcome to church']);
+
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.contents).toContain('Hello everyone');
+    expect(call.contents).toContain('Welcome to church');
+    expect(call.contents).toContain('do not translate these');
+  });
+
+  it('produces an unchanged prompt when no preceding context is given', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    await translateSegment(client, 'Hello', ['zh']);
+
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.contents).toBe(
+      'Translate the following sentence, spoken during a live Australian church sermon, into each of these language codes: zh. Keep the tone natural and spoken, not overly formal.\n\n' +
+        'This is an Australian church, so expect Australian slang, idioms, jokes, and dry understatement (e.g. "heaps," "no worries," "keen," "arvo," "she\'ll be right," "having a go"). Translate for the speaker\'s intended meaning and tone, not word-for-word — don\'t flatten idiomatic phrasing into something overly formal, and don\'t translate slang literally into an unrelated meaning.\n\n' +
+        'Preserve polarity and negation exactly. Never invert a positive statement into a negative one, or vice versa. Don\'t add, remove, or reinterpret theological meaning — when unsure, translate literally rather than paraphrasing. Take care with how God, Jesus, the Holy Spirit, and Scripture are referred to and what is said about them.\n\n' +
+        'Sentence: "Hello"'
+    );
+  });
 });
 
 describe('translateBacklog', () => {
