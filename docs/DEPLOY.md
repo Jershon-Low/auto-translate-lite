@@ -1,35 +1,42 @@
 # Deploying Auto Translate Lite
 
-This guide walks through a test deployment on Oracle Cloud Infrastructure's (OCI) **Always Free** tier, which comfortably covers the CPU/RAM needs of both apps at no cost. If you already have a VPS elsewhere, skip to Step 2 — everything from there on applies to any Ubuntu 22.04 host.
+This guide walks through a test deployment on **AWS EC2**'s free tier, which comfortably covers the CPU/RAM needs of both apps for a short-lived test (with one caveat on RAM during the build — see Step 1). If you already have a VPS elsewhere, skip to Step 2 — everything from there on applies to any Ubuntu 22.04 host.
 
-## 1. Provision a free VM on Oracle Cloud
+## 1. Provision a free-tier EC2 instance
 
-1. **Sign up** at https://cloud.oracle.com for an Oracle Cloud Free Tier account. Oracle requires a credit card for identity verification, but Always Free resources are never charged.
+1. **Sign up / use an existing AWS account** at https://aws.amazon.com. New accounts get 750 hours/month of `t2.micro`/`t3.micro` EC2 usage free for the first 12 months. Note this is different from Oracle's "Always Free" model — AWS's free tier expires after 12 months, it isn't a permanent free allowance, so don't leave the instance running indefinitely and forget about it.
 
-2. **Create the VM instance**: Console → **Compute** → **Instances** → **Create Instance**.
-   - **Image**: pick an Always-Free-eligible image, e.g. "Canonical Ubuntu 22.04" (Minimal or standard).
-   - **Shape**: click **Change shape** → **Ampere** → **VM.Standard.A1.Flex** (Always Free eligible, ARM64). Configure it with **4 OCPUs / 24 GB RAM** — that's the full Always Free allowance for this shape family, and it's plenty to run both the Node backend and the Next.js frontend on one box.
-     - Note: this is an **ARM64 (aarch64)** instance, not the x86 most tutorials assume. Node.js 20+ and every npm dependency this project uses (Express, ws, Next.js, etc.) support ARM64 natively, so this isn't a blocker — just don't be surprised when `uname -m` says `aarch64` instead of `x86_64`.
-     - Fallback if ARM ever causes a problem: the **VM.Standard.E2.1.Micro** shape (AMD/x86, Always Free) is available too, but it's much tighter — only 1 GB RAM and 1/8 OCPU per instance (up to 2 instances). Use it only as a fallback; the walkthrough below assumes the A1.Flex shape.
-   - **Networking**: keep the default VCN/subnet, and make sure **"Assign a public IPv4 address"** is checked.
-   - **SSH keys**: let Oracle generate a key pair and download the private key (e.g. `ssh-key-2026-07-13.key`), or paste your own public key if you already have one.
-   - Click **Create**. Wait for the instance to reach the **Running** state, then note its public IP address (e.g. `140.238.12.34`).
+2. **Launch the instance**: EC2 Console → **Instances** → **Launch instances**.
+   - **Name**: anything, e.g. `auto-translate-lite`.
+   - **AMI**: **Ubuntu Server 22.04 LTS** (free tier eligible, marked as such in the AMI picker).
+   - **Instance type**: **t2.micro** or **t3.micro** (free tier eligible — 1 vCPU / 1 GB RAM).
+     - 1 GB RAM is tight for building this project's Next.js frontend on-box — `npm run build` in `web/` can spike well past 1 GB and get OOM-killed. Pick one of two mitigations before you build in Step 3:
+       - **(a) Add a 2 GB swap file** (recommended — simpler default for a one-off test deploy):
+         ```bash
+         sudo fallocate -l 2G /swapfile
+         sudo chmod 600 /swapfile
+         sudo mkswap /swapfile
+         sudo swapon /swapfile
+         echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+         ```
+       - **(b) Build locally instead**: run `npm run build` for `web/` on your own machine, then `scp` the built `.next/`, `node_modules/`, and `package.json` up to the instance instead of running the build on-box.
+   - **Key pair**: create a new key pair (type **RSA**, format **.pem**), download it, then lock down its permissions locally: `chmod 400 /path/to/key.pem`.
+   - **Network settings**: click **Edit**. The default VPC's default subnet already auto-assigns a public IP — unlike some other clouds, this typically isn't a separate gotcha on EC2 — just confirm **Auto-assign public IP** is set to **Enable**.
+   - **Firewall (security group)**: create a new security group with these inbound rules:
+     | Type | Port | Source |
+     |---|---|---|
+     | SSH | 22 | My IP |
+     | HTTP | 80 | Anywhere (0.0.0.0/0) |
+     | HTTPS | 443 | Anywhere (0.0.0.0/0) |
+     Keep SSH scoped to **My IP**, not `0.0.0.0/0` — there's no reason to leave SSH open to the whole internet.
+   - Click **Launch instance**. Wait for the instance state to reach **Running** and status checks to show **2/2 status checks passed**, then note the public IPv4 address from the instance details page (e.g. `54.123.45.67`).
+   - Note: standard Ubuntu EC2 AMIs do **not** ship with an additional OS-level firewall (no default iptables/ufw rules blocking incoming traffic) — the security group above is the only firewall layer that matters here.
 
-3. **Open the required ports.** This needs changes in **two separate places** — missing the second one is the most common thing people get stuck on:
-   - **Oracle's Security List** (network-level firewall): Console → **Networking** → **Virtual Cloud Networks** → (your VCN) → **Security Lists** → (the default security list) → **Add Ingress Rules**. Add rules for source `0.0.0.0/0`, destination ports **80** (HTTP) and **443** (HTTPS). These are the only ports that need to be public — Caddy reverse-proxies everything, including the WebSocket paths, through 443.
-   - **The instance's own OS firewall**: Oracle's Ubuntu images ship with `iptables` rules that block incoming traffic by default, independently of the Security List above. SSH in first (next step), then run:
-     ```bash
-     sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT
-     sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT
-     sudo netfilter-persistent save
-     ```
-     If `netfilter-persistent` isn't installed: `sudo apt install -y iptables-persistent` first (accept saving the current rules when prompted), then re-run the save command above.
+3. **SSH in**: `ssh -i /path/to/key.pem ubuntu@<public-ip>` (Ubuntu AMIs use the `ubuntu` user by default).
 
-4. **SSH in**: `ssh -i /path/to/downloaded-key.key ubuntu@<public-ip>` (Oracle's Ubuntu images use the `ubuntu` user by default).
+4. **Get a hostname without buying a domain.** Since this is a test deployment, use a free wildcard-DNS service that resolves any hostname containing an IP straight to that IP — [sslip.io](https://sslip.io). Take the public IP and replace the dots with dashes, then append `.sslip.io`:
 
-5. **Get a hostname without buying a domain.** Since this is a test deployment, use a free wildcard-DNS service that resolves any hostname containing an IP straight to that IP — [sslip.io](https://sslip.io). Take the public IP and replace the dots with dashes, then append `.sslip.io`:
-
-   > IP `140.238.12.34` → hostname `140-238-12-34.sslip.io`
+   > IP `54.123.45.67` → hostname `54-123-45-67.sslip.io`
 
    This resolves publicly with zero DNS setup, and works as a normal domain in the Caddyfile below — Caddy can still obtain a real Let's Encrypt certificate for it, so you get real HTTPS. Use `<public-ip-with-dashes>.sslip.io` in place of `translate.yourchurch.org` everywhere below. If you already own a real domain, point an A record at the public IP and use that domain instead — everything past this point works identically either way.
 
@@ -49,7 +56,7 @@ cd ../web && npm install && npm run build
 
 ## 4. Configure environment variables
 - `server/.env`: `DEEPGRAM_API_KEY`, `GEMINI_API_KEY`, `PORT=3001`.
-- `web/.env.production`: `NEXT_PUBLIC_WS_URL=wss://140-238-12-34.sslip.io` (substitute your own instance's hostname — the sslip.io one from Step 1, or your real domain).
+- `web/.env.production`: `NEXT_PUBLIC_WS_URL=wss://54-123-45-67.sslip.io` (substitute your own instance's hostname — the sslip.io one from Step 1, or your real domain).
 
 ## 5. Install and configure Caddy as a reverse proxy (automatic HTTPS)
 ```bash
@@ -58,7 +65,7 @@ sudo apt install -y caddy
 
 `/etc/caddy/Caddyfile`:
 ```
-140-238-12-34.sslip.io {
+54-123-45-67.sslip.io {
   reverse_proxy /ws/* localhost:3001
   reverse_proxy localhost:3000
 }
@@ -85,8 +92,8 @@ curl http://localhost:3001/health
 ```
 Expected: `{"status":"ok"}`
 
-Open `https://140-238-12-34.sslip.io` on a phone.
+Open `https://54-123-45-67.sslip.io` on a phone.
 Expected: the language picker loads over HTTPS; devtools Network tab shows a `101 Switching Protocols` response when a language is selected (WSS upgrade succeeded).
 
 ## 8. Generate the QR code for the LED wall
-Point any QR code generator (e.g. `qrencode "https://140-238-12-34.sslip.io" -o qr.png`, or an online generator) at `https://140-238-12-34.sslip.io` and display the result on the LED wall.
+Point any QR code generator (e.g. `qrencode "https://54-123-45-67.sslip.io" -o qr.png`, or an online generator) at `https://54-123-45-67.sslip.io` and display the result on the LED wall.
