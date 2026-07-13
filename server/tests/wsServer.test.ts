@@ -216,8 +216,10 @@ describe('wsServer', () => {
   });
 
   it('falls back to English when the verifier call fails after retry', async () => {
+    let verifyCallCount = 0;
     (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
       if (params.contents.includes('safety checker')) {
+        verifyCallCount += 1;
         return Promise.reject(new Error('verifier down'));
       }
       return Promise.resolve({ text: '{"zh":"你好"}' });
@@ -238,6 +240,7 @@ describe('wsServer', () => {
     const caption = await captionPromise;
 
     expect(caption).toEqual({ type: 'caption', english: 'Hello everyone', translated: 'Hello everyone' });
+    expect(verifyCallCount).toBe(2);
 
     captureSocket.close();
     viewerSocket.close();
