@@ -9,6 +9,7 @@ type CaptureStatus = 'idle' | 'recording' | 'reconnecting' | 'error';
 export default function CapturePage() {
   const [status, setStatus] = useState<CaptureStatus>('idle');
   const [transcriptLines, setTranscriptLines] = useState<string[]>([]);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -17,7 +18,20 @@ export default function CapturePage() {
 
   async function ensureRecorderStreaming(socket: WebSocket) {
     if (!streamRef.current) {
-      streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      try {
+        streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (error) {
+        setErrorMessage(
+          error instanceof Error
+            ? `Microphone access failed: ${error.message}`
+            : "Microphone access failed. Check your browser's microphone permission for this site."
+        );
+        manuallyStoppedRef.current = true;
+        socket.send(JSON.stringify({ type: 'stop' }));
+        socket.close();
+        setStatus('error');
+        return;
+      }
     }
     const recorder = new MediaRecorder(streamRef.current, { mimeType: 'audio/webm;codecs=opus' });
     recorderRef.current = recorder;
@@ -51,7 +65,7 @@ export default function CapturePage() {
 
     socket.onclose = () => {
       if (manuallyStoppedRef.current) {
-        setStatus('idle');
+        setStatus((current) => (current === 'error' ? current : 'idle'));
         return;
       }
       setStatus('reconnecting');
@@ -61,6 +75,7 @@ export default function CapturePage() {
 
   function start() {
     manuallyStoppedRef.current = false;
+    setErrorMessage(null);
     connectSocket();
   }
 
@@ -94,6 +109,7 @@ export default function CapturePage() {
         </button>
       </div>
       <p className="text-sm text-muted-foreground">Status: {status}</p>
+      {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
       <div className="w-full max-w-xl h-64 overflow-y-auto border rounded p-3 text-sm space-y-1">
         {transcriptLines.map((line, index) => (
           <p key={index}>{line}</p>
