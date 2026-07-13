@@ -287,4 +287,36 @@ describe('wsServer', () => {
     captureSocket.close();
     viewerSocket.close();
   });
+
+  it('falls back to English in the backlog when the verifier call fails after retry', async () => {
+    let verifyCallCount = 0;
+    (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+      if (params.contents.includes('safety checker')) {
+        verifyCallCount += 1;
+        return Promise.reject(new Error('verifier down'));
+      }
+      return Promise.resolve({ text: '{"translations":["较早的一行"]}' });
+    });
+
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    await waitForOpen(captureSocket);
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+
+    session.buffer.append('Earlier line', Date.now());
+
+    const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+    await waitForOpen(viewerSocket);
+    viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+    const backlogMessage = await waitForMessage(viewerSocket);
+
+    expect(backlogMessage).toEqual({
+      type: 'backlog',
+      lines: [{ english: 'Earlier line', translated: 'Earlier line' }],
+    });
+    expect(verifyCallCount).toBe(2);
+
+    captureSocket.close();
+    viewerSocket.close();
+  });
 });

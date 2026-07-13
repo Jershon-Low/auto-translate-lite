@@ -53,5 +53,6 @@ Return, for each id, whether it is safe and a short reason.`,
     },
   });
 
-  return JSON.parse(response.text ?? '{}');
+  const parsed: unknown = JSON.parse(response.text ?? '{}');
+  return parsed && typeof parsed === 'object' ? (parsed as Record<string, VerificationResult>) : {};
 }

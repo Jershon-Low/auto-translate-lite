@@ -75,6 +75,24 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
   });
 }
 
+function logTranslationFallback(
+  language: string,
+  english: string,
+  discardedTranslation: string,
+  reason: string
+): void {
+  console.warn(
+    JSON.stringify({
+      event: 'translation_fallback',
+      timestamp: new Date().toISOString(),
+      language,
+      english,
+      discardedTranslation,
+      reason,
+    })
+  );
+}
+
 async function handleFinalSegment(
   english: string,
   deps: WsServerDeps,
@@ -112,16 +130,7 @@ async function handleFinalSegment(
     const outgoing = safe ? translated : english;
 
     if (!safe) {
-      console.warn(
-        JSON.stringify({
-          event: 'translation_fallback',
-          timestamp: new Date().toISOString(),
-          language,
-          english,
-          discardedTranslation: translated,
-          reason: verification?.reason ?? 'verification unavailable',
-        })
-      );
+      logTranslationFallback(language, english, translated, verification?.reason ?? 'verification unavailable');
     }
 
     const payload = JSON.stringify({ type: 'caption', english: line.english, translated: outgoing });
@@ -180,18 +189,14 @@ function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
           const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems);
 
           const verifiedLines = lines.map((line, index) => {
-            if (line.translated.length === 0) return line;
+            if (line.translated.length === 0) return { english: line.english, translated: line.english };
             const verification = verifications[String(index)];
             if (verification?.safe === true) return line;
-            console.warn(
-              JSON.stringify({
-                event: 'translation_fallback',
-                timestamp: new Date().toISOString(),
-                language,
-                english: line.english,
-                discardedTranslation: line.translated,
-                reason: verification?.reason ?? 'verification unavailable',
-              })
+            logTranslationFallback(
+              language,
+              line.english,
+              line.translated,
+              verification?.reason ?? 'verification unavailable'
             );
             return { english: line.english, translated: line.english };
           });
