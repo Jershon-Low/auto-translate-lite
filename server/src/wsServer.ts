@@ -2,6 +2,7 @@ import type { IncomingMessage, Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Session } from './session.js';
 import { translateSegment, translateBacklog, type GeminiClient } from './gemini.js';
+import { verifyTranslations, type VerificationItem, type VerificationResult } from './translationVerifier.js';
 import type { DeepgramConnection, DeepgramConnectionFactory } from './deepgram.js';
 
 export interface WsServerDeps {
@@ -97,12 +98,52 @@ async function handleFinalSegment(
     }
   }
 
+  const verificationItems: VerificationItem[] = activeLanguages
+    .filter((language) => Boolean(translations[language]))
+    .map((language) => ({ id: language, english, translated: translations[language] }));
+  const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems);
+
   for (const language of activeLanguages) {
     const translated = translations[language];
     if (!translated) continue;
-    const payload = JSON.stringify({ type: 'caption', english: line.english, translated });
+
+    const verification = verifications[language];
+    const safe = verification?.safe === true;
+    const outgoing = safe ? translated : english;
+
+    if (!safe) {
+      console.warn(
+        JSON.stringify({
+          event: 'translation_fallback',
+          timestamp: new Date().toISOString(),
+          language,
+          english,
+          discardedTranslation: translated,
+          reason: verification?.reason ?? 'verification unavailable',
+        })
+      );
+    }
+
+    const payload = JSON.stringify({ type: 'caption', english: line.english, translated: outgoing });
     for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
       viewerSocket.send(payload);
+    }
+  }
+}
+
+async function verifyTranslationsWithRetry(
+  client: GeminiClient,
+  items: VerificationItem[]
+): Promise<Record<string, VerificationResult>> {
+  if (items.length === 0) return {};
+  try {
+    return await verifyTranslations(client, items);
+  } catch {
+    try {
+      return await verifyTranslations(client, items);
+    } catch (secondError) {
+      console.error('Verification failed after retry, treating all as unverified:', secondError);
+      return {};
     }
   }
 }

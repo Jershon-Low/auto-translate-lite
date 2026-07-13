@@ -6,6 +6,21 @@ import { Session } from '../src/session';
 import type { GeminiClient } from '../src/gemini';
 import type { DeepgramCallbacks } from '../src/deepgram';
 
+function fakeGeminiClient(overrides: { translate?: string; verify?: string } = {}): GeminiClient {
+  const translateText = overrides.translate ?? '{"zh":"你好"}';
+  const verifyText = overrides.verify ?? '{"zh":{"safe":true,"reason":"ok"}}';
+  return {
+    models: {
+      generateContent: vi.fn().mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: verifyText });
+        }
+        return Promise.resolve({ text: translateText });
+      }),
+    },
+  };
+}
+
 function waitForMessage(ws: WebSocket): Promise<any> {
   return new Promise((resolve) => {
     ws.once('message', (data) => resolve(JSON.parse(data.toString())));
@@ -28,11 +43,7 @@ describe('wsServer', () => {
     capturedCallbacks = null;
     httpServer = createServer();
 
-    geminiClient = {
-      models: {
-        generateContent: vi.fn().mockResolvedValue({ text: '{"zh":"你好"}' }),
-      },
-    };
+    geminiClient = fakeGeminiClient();
 
     attachWsServer({
       httpServer,
@@ -168,6 +179,65 @@ describe('wsServer', () => {
       english: 'Now the viewer is registered',
       translated: '你好',
     });
+
+    captureSocket.close();
+    viewerSocket.close();
+  });
+
+  it('falls back to the English line when the verifier flags a translation as unsafe', async () => {
+    (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+      if (params.contents.includes('safety checker')) {
+        return Promise.resolve({ text: '{"zh":{"safe":false,"reason":"polarity flip"}}' });
+      }
+      return Promise.resolve({ text: '{"zh":"耶稣不爱你"}' });
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    await waitForOpen(captureSocket);
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+
+    const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+    await waitForOpen(viewerSocket);
+    viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+    await waitForMessage(viewerSocket); // backlog: []
+
+    const captionPromise = waitForMessage(viewerSocket);
+    capturedCallbacks!.onFinalSegment('Jesus loves you');
+    const caption = await captionPromise;
+
+    expect(caption).toEqual({ type: 'caption', english: 'Jesus loves you', translated: 'Jesus loves you' });
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('translation_fallback'));
+
+    warnSpy.mockRestore();
+    captureSocket.close();
+    viewerSocket.close();
+  });
+
+  it('falls back to English when the verifier call fails after retry', async () => {
+    (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+      if (params.contents.includes('safety checker')) {
+        return Promise.reject(new Error('verifier down'));
+      }
+      return Promise.resolve({ text: '{"zh":"你好"}' });
+    });
+
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    await waitForOpen(captureSocket);
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+
+    const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+    await waitForOpen(viewerSocket);
+    viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+    await waitForMessage(viewerSocket); // backlog: []
+
+    const captionPromise = waitForMessage(viewerSocket);
+    capturedCallbacks!.onFinalSegment('Hello everyone');
+    const caption = await captionPromise;
+
+    expect(caption).toEqual({ type: 'caption', english: 'Hello everyone', translated: 'Hello everyone' });
 
     captureSocket.close();
     viewerSocket.close();
