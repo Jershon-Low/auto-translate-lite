@@ -5,8 +5,10 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useViewerSocket } from '@/lib/useViewerSocket';
 import { exportTranscriptPdf } from '@/lib/exportTranscriptPdf';
 import { TARGET_LANGUAGES } from '@/lib/languages';
+import { getFeedbackStrings } from '@/lib/feedbackStrings';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001';
+const API_URL = WS_URL.replace(/^ws/, 'http');
 
 function ViewerPageContent() {
   const searchParams = useSearchParams();
@@ -20,6 +22,15 @@ function ViewerPageContent() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
 
+  type LineFeedbackMode = 'idle' | 'open' | 'submitting' | 'submitted' | 'flagged' | 'error';
+  interface LineFeedbackState {
+    mode: LineFeedbackMode;
+    comment: string;
+  }
+  const [feedbackByLine, setFeedbackByLine] = useState<Record<number, LineFeedbackState>>({});
+  const flaggedTimeoutsRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  const strings = getFeedbackStrings(language);
+
   useEffect(() => {
     if (!language) {
       router.replace('/');
@@ -31,6 +42,12 @@ function ViewerPageContent() {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [lines]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(flaggedTimeoutsRef.current).forEach(clearTimeout);
+    };
+  }, []);
 
   function handleScroll() {
     const container = containerRef.current;
@@ -59,6 +76,107 @@ function ViewerPageContent() {
     } finally {
       setIsExporting(false);
     }
+  }
+
+  function openFeedback(index: number) {
+    setFeedbackByLine((previous) => ({
+      ...previous,
+      [index]: { mode: 'open', comment: previous[index]?.comment ?? '' },
+    }));
+  }
+
+  function cancelFeedback(index: number) {
+    setFeedbackByLine((previous) => ({ ...previous, [index]: { mode: 'idle', comment: '' } }));
+  }
+
+  function updateFeedbackComment(index: number, comment: string) {
+    setFeedbackByLine((previous) => ({ ...previous, [index]: { mode: 'open', comment } }));
+  }
+
+  async function submitFeedback(index: number, line: { english: string; translated: string }, comment: string) {
+    setFeedbackByLine((previous) => ({ ...previous, [index]: { mode: 'submitting', comment } }));
+    try {
+      const response = await fetch(`${API_URL}/viewer-feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          language,
+          lineIndex: index,
+          english: line.english,
+          translated: line.translated,
+          comment,
+        }),
+      });
+      if (!response.ok) throw new Error('request failed');
+      setFeedbackByLine((previous) => ({ ...previous, [index]: { mode: 'submitted', comment: '' } }));
+      flaggedTimeoutsRef.current[index] = setTimeout(() => {
+        setFeedbackByLine((previous) => ({ ...previous, [index]: { mode: 'flagged', comment: '' } }));
+      }, 2000);
+    } catch {
+      setFeedbackByLine((previous) => ({ ...previous, [index]: { mode: 'error', comment } }));
+    }
+  }
+
+  function renderLineFeedback(index: number, line: { english: string; translated: string }) {
+    const state = feedbackByLine[index] ?? { mode: 'idle' as const, comment: '' };
+
+    if (state.mode === 'idle') {
+      return (
+        <button
+          onClick={() => openFeedback(index)}
+          aria-label="Flag this line"
+          className="text-lg leading-none text-muted-foreground hover:text-foreground"
+        >
+          ⚑
+        </button>
+      );
+    }
+
+    if (state.mode === 'flagged') {
+      return (
+        <button
+          onClick={() => openFeedback(index)}
+          aria-label="Flag this line again"
+          className="text-lg leading-none opacity-40"
+        >
+          ⚑
+        </button>
+      );
+    }
+
+    if (state.mode === 'submitted') {
+      return <span className="text-xs text-green-600 whitespace-nowrap">{strings.thanksConfirmation}</span>;
+    }
+
+    return (
+      <div className="flex flex-col gap-1 w-48 shrink-0">
+        <textarea
+          value={state.comment}
+          onChange={(event) => updateFeedbackComment(index, event.target.value)}
+          rows={2}
+          className="w-full border rounded p-1 text-xs"
+          placeholder={strings.flagPlaceholder}
+          disabled={state.mode === 'submitting'}
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={() => void submitFeedback(index, line, state.comment)}
+            disabled={state.mode === 'submitting'}
+            className="text-xs bg-secondary text-secondary-foreground px-2 py-1 rounded disabled:opacity-50"
+          >
+            {strings.submit}
+          </button>
+          <button
+            onClick={() => cancelFeedback(index)}
+            disabled={state.mode === 'submitting'}
+            className="text-xs underline disabled:opacity-50"
+          >
+            {strings.cancel}
+          </button>
+        </div>
+        {state.mode === 'error' && <p className="text-xs text-destructive">{strings.submitError}</p>}
+      </div>
+    );
   }
 
   if (!language) return null;
@@ -95,9 +213,12 @@ function ViewerPageContent() {
               <span className="flex-1 border-t border-dashed" />
             </div>
           ) : (
-            <div key={index}>
-              <p className="text-sm text-muted-foreground">{line.english}</p>
-              <p className="text-xl">{line.translated}</p>
+            <div key={index} className="flex items-start gap-2">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-muted-foreground">{line.english}</p>
+                <p className="text-xl">{line.translated}</p>
+              </div>
+              {renderLineFeedback(index, line)}
             </div>
           )
         )}
