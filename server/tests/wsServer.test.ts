@@ -434,5 +434,118 @@ describe('wsServer', () => {
 
       captureSocket.close();
     });
+
+    it('drops the stale cache reference on translation retry and self-heals subsequent segments', async () => {
+      sermonDocStore.set(
+        'This week: the story of Cain and Abel. Genesis chapter four covers jealousy, ' +
+          "the first murder, and God's response to Cain after he kills his brother out in the field."
+      );
+
+      let translateCallCount = 0;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        translateCallCount += 1;
+        if (translateCallCount === 1) {
+          return Promise.reject(new Error('cachedContent reference expired'));
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      expect(session.sermonCache).toEqual({ name: 'cachedContents/test' });
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('Cain killed Abel');
+      const caption = await captionPromise;
+
+      expect(caption).toEqual({ type: 'caption', english: 'Cain killed Abel', translated: '你好' });
+
+      const translateCalls = (geminiClient.models.generateContent as any).mock.calls.filter(
+        (call: any) => !call[0].contents.includes('safety checker')
+      );
+      expect(translateCalls).toHaveLength(2);
+      expect(translateCalls[0][0].config.cachedContent).toBe('cachedContents/test');
+      expect(translateCalls[1][0].config).not.toHaveProperty('cachedContent');
+
+      // Cross-segment self-healing: the session's cache reference was cleared,
+      // so a later segment must not even attempt to use it.
+      expect(session.sermonCache).toBeNull();
+
+      const captionPromise2 = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('A later segment');
+      await captionPromise2;
+
+      const translateCallsAfter = (geminiClient.models.generateContent as any).mock.calls.filter(
+        (call: any) => !call[0].contents.includes('safety checker')
+      );
+      expect(translateCallsAfter).toHaveLength(3);
+      expect(translateCallsAfter[2][0].config).not.toHaveProperty('cachedContent');
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('drops the stale cache reference on verification retry', async () => {
+      sermonDocStore.set(
+        'This week: the story of Cain and Abel. Genesis chapter four covers jealousy, ' +
+          "the first murder, and God's response to Cain after he kills his brother out in the field."
+      );
+
+      let verifyCallCount = 0;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('safety checker')) {
+          verifyCallCount += 1;
+          if (verifyCallCount === 1) {
+            return Promise.reject(new Error('cachedContent reference expired'));
+          }
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('Cain killed Abel');
+      const caption = await captionPromise;
+
+      expect(caption).toEqual({ type: 'caption', english: 'Cain killed Abel', translated: '你好' });
+      expect(verifyCallCount).toBe(2);
+
+      const verifyCalls = (geminiClient.models.generateContent as any).mock.calls.filter((call: any) =>
+        call[0].contents.includes('safety checker')
+      );
+      expect(verifyCalls).toHaveLength(2);
+      expect(verifyCalls[0][0].config.cachedContent).toBe('cachedContents/test');
+      expect(verifyCalls[1][0].config).not.toHaveProperty('cachedContent');
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
   });
 });

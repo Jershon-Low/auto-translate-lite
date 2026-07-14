@@ -136,13 +136,14 @@ async function handleFinalSegment(
   try {
     translations = await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext, sermonCache);
   } catch {
+    deps.session.sermonCache = null;
     try {
       translations = await translateSegment(
         deps.geminiClient,
         english,
         activeLanguages,
         precedingContext,
-        sermonCache
+        null
       );
     } catch (secondError) {
       console.error('Translation failed after retry, skipping segment:', secondError);
@@ -184,7 +185,7 @@ async function verifyTranslationsWithRetry(
     return await verifyTranslations(client, items, sermonCache);
   } catch {
     try {
-      return await verifyTranslations(client, items, sermonCache);
+      return await verifyTranslations(client, items, null);
     } catch (secondError) {
       console.error('Verification failed after retry, treating all as unverified:', secondError);
       return {};
