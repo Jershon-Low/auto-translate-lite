@@ -1,5 +1,4 @@
-// @ts-ignore - pdf-parse has named exports but mocks use default in tests
-import pdfParse from 'pdf-parse';
+import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 
 const MAX_CHARS = 30000;
@@ -9,8 +8,13 @@ const DOCX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.wordproces
 export async function extractDocumentText(buffer: Buffer, mimetype: string): Promise<string> {
   let text: string;
   if (mimetype === PDF_MIME_TYPE) {
-    const result = await pdfParse(buffer);
-    text = result.text;
+    const parser = new PDFParse({ data: buffer });
+    try {
+      const result = await parser.getText();
+      text = result.text;
+    } finally {
+      await parser.destroy();
+    }
   } else if (mimetype === DOCX_MIME_TYPE) {
     const result = await mammoth.extractRawText({ buffer });
     text = result.value;

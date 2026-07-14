@@ -1,13 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
 
+const getTextMock = vi.fn().mockResolvedValue({ text: '  Extracted PDF text  ' });
+const destroyMock = vi.fn().mockResolvedValue(undefined);
+
 vi.mock('pdf-parse', () => ({
-  default: vi.fn().mockResolvedValue({ text: '  Extracted PDF text  ' }),
+  PDFParse: vi.fn().mockImplementation(() => ({
+    getText: getTextMock,
+    destroy: destroyMock,
+  })),
 }));
 vi.mock('mammoth', () => ({
   default: { extractRawText: vi.fn().mockResolvedValue({ value: '  Extracted docx text  ' }) },
 }));
 
-import pdfParse from 'pdf-parse';
 import { extractDocumentText } from '../src/docExtraction';
 
 const DOCX_MIME =
@@ -31,7 +36,7 @@ describe('extractDocumentText', () => {
   });
 
   it('truncates text longer than 30,000 characters', async () => {
-    (pdfParse as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ text: 'A'.repeat(40000) });
+    getTextMock.mockResolvedValueOnce({ text: 'A'.repeat(40000) });
     const result = await extractDocumentText(Buffer.from('fake'), 'application/pdf');
     expect(result).toHaveLength(30000);
   });
