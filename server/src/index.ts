@@ -7,6 +7,7 @@ import { createGeminiClient } from './gemini.js';
 import { createDeepgramConnection } from './deepgram.js';
 import { createSermonDocStore } from './sermonDocStore.js';
 import { createFeedbackStore } from './feedbackStore.js';
+import { createViewerFeedbackStore } from './viewerFeedbackStore.js';
 import { createCostTracker } from './costTracker.js';
 import { withCostTracking } from './geminiCostTracking.js';
 
@@ -22,8 +23,11 @@ const costTracker = createCostTracker(process.env.COST_FILE_PATH ?? 'data/cost.j
 const geminiClient = withCostTracking(createGeminiClient(process.env.GEMINI_API_KEY!), costTracker);
 const sermonDocStore = createSermonDocStore();
 const feedbackStore = createFeedbackStore(process.env.FEEDBACK_FILE_PATH ?? 'data/feedback.txt');
+const viewerFeedbackStore = createViewerFeedbackStore(
+  process.env.VIEWER_FEEDBACK_FILE_PATH ?? 'data/viewer-feedback.json'
+);
 
-const app = createApp({ sermonDocStore, feedbackStore });
+const app = createApp({ sermonDocStore, feedbackStore, viewerFeedbackStore, session });
 const httpServer = createServer(app);
 
 attachWsServer({

@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { createApp } from '../src/app';
 import { createSermonDocStore } from '../src/sermonDocStore';
 import { createFeedbackStore } from '../src/feedbackStore';
+import { createViewerFeedbackStore } from '../src/viewerFeedbackStore';
+import { Session } from '../src/session';
 
 vi.mock('../src/docExtraction', () => ({
   extractDocumentText: vi.fn().mockResolvedValue('Extracted sermon text'),
@@ -16,6 +18,10 @@ function testDeps() {
   return {
     sermonDocStore: createSermonDocStore(),
     feedbackStore: createFeedbackStore(join(tmpdir(), `feedback-app-test-${Date.now()}-${Math.random()}.txt`)),
+    viewerFeedbackStore: createViewerFeedbackStore(
+      join(tmpdir(), `viewer-feedback-app-test-${Date.now()}-${Math.random()}.json`)
+    ),
+    session: new Session(),
   };
 }
 
@@ -84,5 +90,71 @@ describe('GET/PUT /feedback', () => {
 
     const getResponse = await request(app).get('/feedback');
     expect(getResponse.body).toEqual({ text: 'Cain -> 该隐' });
+  });
+});
+
+describe('POST /viewer-feedback', () => {
+  it('returns 400 when a required field is missing', async () => {
+    const response = await request(createApp(testDeps()))
+      .post('/viewer-feedback')
+      .send({ language: 'es', english: 'Hi', translated: 'Hola' }); // missing lineIndex
+    expect(response.status).toBe(400);
+  });
+
+  it('creates an item tagged with the current session id, defaulting comment to an empty string', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+
+    const response = await request(app).post('/viewer-feedback').send({
+      language: 'es',
+      lineIndex: 2,
+      english: 'In the beginning',
+      translated: 'En el principio',
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.ok).toBe(true);
+
+    const items = deps.viewerFeedbackStore.list();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      sessionId: deps.session.id,
+      language: 'es',
+      lineIndex: 2,
+      english: 'In the beginning',
+      translated: 'En el principio',
+      comment: '',
+      downloaded: false,
+    });
+  });
+
+  it('stores a provided comment', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+    await request(app).post('/viewer-feedback').send({
+      language: 'fr',
+      lineIndex: 0,
+      english: 'Hello',
+      translated: 'Bonjour',
+      comment: 'sounds off',
+    });
+    expect(deps.viewerFeedbackStore.list()[0].comment).toBe('sounds off');
+  });
+});
+
+describe('GET /viewer-feedback', () => {
+  it('returns an empty list when nothing has been submitted yet', async () => {
+    const response = await request(createApp(testDeps())).get('/viewer-feedback');
+    expect(response.body).toEqual({ items: [] });
+  });
+
+  it('returns submitted items newest first', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+    await request(app).post('/viewer-feedback').send({ language: 'ja', lineIndex: 0, english: 'A', translated: 'あ' });
+    await request(app).post('/viewer-feedback').send({ language: 'ja', lineIndex: 1, english: 'B', translated: 'い' });
+
+    const response = await request(app).get('/viewer-feedback');
+    expect(response.body.items.map((item: { english: string }) => item.english)).toEqual(['B', 'A']);
   });
 });
