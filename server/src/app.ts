@@ -1,4 +1,5 @@
 import express, { type Express } from 'express';
+import cors from 'cors';
 import multer from 'multer';
 import { extractDocumentText } from './docExtraction.js';
 import type { SermonDocStore } from './sermonDocStore.js';
@@ -13,6 +14,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 
 export function createApp(deps: AppDeps): Express {
   const app = express();
+  app.use(cors());
   app.use(express.json());
 
   app.get('/health', (_req, res) => {

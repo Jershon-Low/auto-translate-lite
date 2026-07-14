@@ -25,6 +25,11 @@ describe('GET /health', () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ status: 'ok' });
   });
+
+  it('includes a permissive CORS header so cross-origin browser requests are allowed', async () => {
+    const response = await request(createApp(testDeps())).get('/health');
+    expect(response.headers['access-control-allow-origin']).toBe('*');
+  });
 });
 
 describe('POST /sermon-doc', () => {
