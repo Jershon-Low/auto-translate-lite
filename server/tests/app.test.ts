@@ -158,3 +158,57 @@ describe('GET /viewer-feedback', () => {
     expect(response.body.items.map((item: { english: string }) => item.english)).toEqual(['B', 'A']);
   });
 });
+
+describe('POST /viewer-feedback/:id/download', () => {
+  it('returns 404 for an unknown id', async () => {
+    const response = await request(createApp(testDeps())).post('/viewer-feedback/does-not-exist/download');
+    expect(response.status).toBe(404);
+  });
+
+  it('returns a one-row CSV for the item and marks it downloaded', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+    await request(app).post('/viewer-feedback').send({
+      language: 'ko',
+      lineIndex: 1,
+      english: 'Peace be with you',
+      translated: '평안이 있기를',
+      comment: 'unclear',
+    });
+    const [{ id }] = deps.viewerFeedbackStore.list();
+
+    const response = await request(app).post(`/viewer-feedback/${id}/download`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers['content-type']).toContain('text/csv');
+    expect(response.text).toContain('Peace be with you');
+    expect(response.text).toContain('평안이 있기를');
+    expect(response.text).toContain('unclear');
+    expect(deps.viewerFeedbackStore.get(id)?.downloaded).toBe(true);
+  });
+});
+
+describe('POST /viewer-feedback/download-all', () => {
+  it('returns a header-only CSV when nothing is undownloaded', async () => {
+    const response = await request(createApp(testDeps())).post('/viewer-feedback/download-all');
+    expect(response.status).toBe(200);
+    expect(response.text).toBe('Timestamp,Language,English,Translated,Comment,Session ID\r\n');
+  });
+
+  it('returns only undownloaded items and marks them all downloaded', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+    await request(app).post('/viewer-feedback').send({ language: 'ja', lineIndex: 0, english: 'Alpha line', translated: 'あ' });
+    await request(app).post('/viewer-feedback').send({ language: 'ja', lineIndex: 1, english: 'Beta line', translated: 'い' });
+    const items = deps.viewerFeedbackStore.list(); // newest first: Beta, then Alpha
+    const alphaId = items.find((item) => item.english === 'Alpha line')!.id;
+    await request(app).post(`/viewer-feedback/${alphaId}/download`); // marks Alpha downloaded
+
+    const response = await request(app).post('/viewer-feedback/download-all');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('Beta line');
+    expect(response.text).not.toContain('Alpha line');
+    expect(deps.viewerFeedbackStore.list().every((item) => item.downloaded)).toBe(true);
+  });
+});

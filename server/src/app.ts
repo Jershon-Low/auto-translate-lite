@@ -2,6 +2,7 @@ import express, { type Express } from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import { extractDocumentText } from './docExtraction.js';
+import { toCsv } from './csv.js';
 import type { SermonDocStore } from './sermonDocStore.js';
 import type { FeedbackStore } from './feedbackStore.js';
 import type { ViewerFeedbackStore } from './viewerFeedbackStore.js';
@@ -78,6 +79,35 @@ export function createApp(deps: AppDeps): Express {
 
   app.get('/viewer-feedback', (_req, res) => {
     res.json({ items: deps.viewerFeedbackStore.list() });
+  });
+
+  const VIEWER_FEEDBACK_CSV_HEADER = ['Timestamp', 'Language', 'English', 'Translated', 'Comment', 'Session ID'];
+
+  app.post('/viewer-feedback/:id/download', (req, res) => {
+    const item = deps.viewerFeedbackStore.get(req.params.id);
+    if (!item) {
+      res.status(404).json({ error: 'Feedback item not found' });
+      return;
+    }
+    deps.viewerFeedbackStore.markDownloaded([item.id]);
+    const csv = toCsv(VIEWER_FEEDBACK_CSV_HEADER, [
+      [item.timestamp, item.language, item.english, item.translated, item.comment, item.sessionId],
+    ]);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="feedback-${item.id}.csv"`);
+    res.send(csv);
+  });
+
+  app.post('/viewer-feedback/download-all', (_req, res) => {
+    const undownloaded = deps.viewerFeedbackStore.getUndownloaded();
+    deps.viewerFeedbackStore.markDownloaded(undownloaded.map((item) => item.id));
+    const csv = toCsv(
+      VIEWER_FEEDBACK_CSV_HEADER,
+      undownloaded.map((item) => [item.timestamp, item.language, item.english, item.translated, item.comment, item.sessionId])
+    );
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="feedback-all-${Date.now()}.csv"`);
+    res.send(csv);
   });
 
   return app;
