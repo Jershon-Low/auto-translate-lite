@@ -58,6 +58,20 @@ describe('translateSegment', () => {
         'Sentence: "Hello"'
     );
   });
+
+  it('includes cachedContent in the request config when a sermon cache is provided', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    await translateSegment(client, 'Hello', ['zh'], [], { name: 'cachedContents/abc' });
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.config.cachedContent).toBe('cachedContents/abc');
+  });
+
+  it('omits cachedContent from the request config when no sermon cache is provided', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    await translateSegment(client, 'Hello', ['zh']);
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.config.cachedContent).toBeUndefined();
+  });
 });
 
 describe('translateBacklog', () => {

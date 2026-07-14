@@ -44,7 +44,8 @@ export async function translateSegment(
   client: GeminiClient,
   englishText: string,
   languageCodes: string[],
-  precedingContext: string[] = []
+  precedingContext: string[] = [],
+  sermonCache: SermonCacheRef | null = null
 ): Promise<Record<string, string>> {
   if (languageCodes.length === 0) return {};
 
@@ -63,6 +64,7 @@ ${buildContextBlock(precedingContext)}Sentence: "${englishText}"`,
     config: {
       responseMimeType: 'application/json',
       responseSchema: { type: 'object', properties, required: languageCodes },
+      ...(sermonCache ? { cachedContent: sermonCache.name } : {}),
     },
   });
 
