@@ -21,7 +21,7 @@ export interface GeminiClient {
       model: string;
       config: { systemInstruction: string; ttl: string; displayName?: string };
     }): Promise<{ name?: string }>;
-    delete(params: { name: string }): Promise<void>;
+    delete(params: { name: string }): Promise<unknown>;
   };
 }
 
