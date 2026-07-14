@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Session } from './session.js';
 import { translateSegment, translateBacklog, type GeminiClient, type SermonCacheRef } from './gemini.js';
 import { verifyTranslations, type VerificationItem, type VerificationResult } from './translationVerifier.js';
+import { verifyTranscription, type TranscriptionCheckResult } from './transcriptionVerifier.js';
 import type { DeepgramConnection, DeepgramConnectionFactory } from './deepgram.js';
 import { createSermonContextCache, deleteSermonContextCache } from './sermonCache.js';
 import type { SermonDocStore } from './sermonDocStore.js';
@@ -116,38 +117,28 @@ async function handleFinalSegment(
   deps: WsServerDeps,
   captureSocket: WebSocket
 ): Promise<void> {
+  const recentLines = deps.session.buffer.getRecent();
+  const precedingContext = recentLines.slice(-3).map((recentLine) => recentLine.english);
+  const sermonCache = deps.session.sermonCache;
+  const activeLanguages = deps.session.getActiveLanguages();
+
+  const [transcriptionResult, translations] = await Promise.all([
+    verifyTranscriptionWithRetry(deps.geminiClient, english, precedingContext, sermonCache),
+    translateWithFallback(deps, english, activeLanguages, precedingContext, sermonCache),
+  ]);
+
+  if (!transcriptionResult.safe) {
+    void logEvent('warn', { event: 'transcription_flagged', english, reason: transcriptionResult.reason });
+    captureSocket.send(
+      JSON.stringify({ type: 'transcript', english, flagged: true, reason: transcriptionResult.reason })
+    );
+    return;
+  }
+
   const line = deps.session.buffer.append(english);
   captureSocket.send(JSON.stringify({ type: 'transcript', english }));
 
-  const activeLanguages = deps.session.getActiveLanguages();
   if (activeLanguages.length === 0) return;
-
-  const recentLines = deps.session.buffer.getRecent();
-  const precedingContext = recentLines.slice(-4, -1).map((recentLine) => recentLine.english);
-  const sermonCache = deps.session.sermonCache;
-
-  let translations: Record<string, string>;
-  try {
-    translations = await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext, sermonCache);
-  } catch {
-    deps.session.sermonCache = null;
-    try {
-      translations = await translateSegment(
-        deps.geminiClient,
-        english,
-        activeLanguages,
-        precedingContext,
-        null
-      );
-    } catch (secondError) {
-      void logEvent('error', {
-        event: 'translation_failed',
-        english,
-        error: secondError instanceof Error ? secondError.message : String(secondError),
-      });
-      return;
-    }
-  }
 
   const verificationItems: VerificationItem[] = activeLanguages
     .filter((language) => Boolean(translations[language]))
@@ -169,6 +160,53 @@ async function handleFinalSegment(
     const payload = JSON.stringify({ type: 'caption', english: line.english, translated: outgoing });
     for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
       viewerSocket.send(payload);
+    }
+  }
+}
+
+async function translateWithFallback(
+  deps: WsServerDeps,
+  english: string,
+  activeLanguages: string[],
+  precedingContext: string[],
+  sermonCache: SermonCacheRef | null
+): Promise<Record<string, string>> {
+  if (activeLanguages.length === 0) return {};
+  try {
+    return await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext, sermonCache);
+  } catch {
+    deps.session.sermonCache = null;
+    try {
+      return await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext, null);
+    } catch (secondError) {
+      void logEvent('error', {
+        event: 'translation_failed',
+        english,
+        error: secondError instanceof Error ? secondError.message : String(secondError),
+      });
+      return {};
+    }
+  }
+}
+
+async function verifyTranscriptionWithRetry(
+  client: GeminiClient,
+  english: string,
+  precedingContext: string[],
+  sermonCache: SermonCacheRef | null
+): Promise<TranscriptionCheckResult> {
+  try {
+    return await verifyTranscription(client, english, precedingContext, sermonCache);
+  } catch {
+    try {
+      return await verifyTranscription(client, english, precedingContext, null);
+    } catch (secondError) {
+      void logEvent('error', {
+        event: 'transcription_verification_failed',
+        english,
+        error: secondError instanceof Error ? secondError.message : String(secondError),
+      });
+      return { safe: false, reason: 'verification unavailable' };
     }
   }
 }

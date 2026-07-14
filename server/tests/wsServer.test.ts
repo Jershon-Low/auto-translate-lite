@@ -13,11 +13,16 @@ import { join } from 'node:path';
 
 process.env.LOG_FILE_PATH = join(tmpdir(), 'auto-translate-lite-test-events.log');
 
-function fakeGeminiClient(overrides: { translate?: string; verify?: string } = {}): GeminiClient {
+function fakeGeminiClient(
+  overrides: { translate?: string; verify?: string; transcriptionCheck?: string } = {}
+): GeminiClient {
   const translateText = overrides.translate ?? '{"zh":"你好"}';
   return {
     models: {
       generateContent: vi.fn().mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: overrides.transcriptionCheck ?? '{"safe":true,"reason":"ok"}' });
+        }
         if (params.contents.includes('safety checker')) {
           if (overrides.verify) {
             return Promise.resolve({ text: overrides.verify });
@@ -44,6 +49,11 @@ function fakeGeminiClient(overrides: { translate?: string; verify?: string } = {
 
 function fakeFeedbackStore(text = ''): FeedbackStore {
   return { read: vi.fn().mockResolvedValue(text), write: vi.fn().mockResolvedValue(undefined) };
+}
+
+function isTranslateCall(call: any): boolean {
+  const contents = call[0].contents as string;
+  return !contents.includes('safety checker') && !contents.includes('transcription accuracy checker');
 }
 
 function waitForMessage(ws: WebSocket): Promise<any> {
@@ -136,9 +146,7 @@ describe('wsServer', () => {
     capturedCallbacks!.onFinalSegment('Fifth line');
     await captionPromise;
 
-    const translateCall = (geminiClient.models.generateContent as any).mock.calls.find(
-      (call: any) => !call[0].contents.includes('safety checker')
-    );
+    const translateCall = (geminiClient.models.generateContent as any).mock.calls.find(isTranslateCall);
     expect(translateCall[0].contents).toContain('Second line');
     expect(translateCall[0].contents).toContain('Third line');
     expect(translateCall[0].contents).toContain('Fourth line');
@@ -249,6 +257,9 @@ describe('wsServer', () => {
 
   it('falls back to the English line when the verifier flags a translation as unsafe', async () => {
     (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+      if (params.contents.includes('transcription accuracy checker')) {
+        return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+      }
       if (params.contents.includes('safety checker')) {
         return Promise.resolve({ text: '{"zh":{"safe":false,"reason":"polarity flip"}}' });
       }
@@ -281,6 +292,9 @@ describe('wsServer', () => {
   it('falls back to English when the verifier call fails after retry', async () => {
     let verifyCallCount = 0;
     (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+      if (params.contents.includes('transcription accuracy checker')) {
+        return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+      }
       if (params.contents.includes('safety checker')) {
         verifyCallCount += 1;
         return Promise.reject(new Error('verifier down'));
@@ -398,9 +412,7 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('Cain killed Abel');
       await captionPromise;
 
-      const translateCall = (geminiClient.models.generateContent as any).mock.calls.find(
-        (call: any) => !call[0].contents.includes('safety checker')
-      );
+      const translateCall = (geminiClient.models.generateContent as any).mock.calls.find(isTranslateCall);
       expect(translateCall[0].config.cachedContent).toBe('cachedContents/test');
 
       captureSocket.close();
@@ -472,6 +484,9 @@ describe('wsServer', () => {
 
       let translateCallCount = 0;
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
         if (params.contents.includes('safety checker')) {
           const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
           const result: Record<string, { safe: boolean; reason: string }> = {};
@@ -503,9 +518,7 @@ describe('wsServer', () => {
 
       expect(caption).toEqual({ type: 'caption', english: 'Cain killed Abel', translated: '你好' });
 
-      const translateCalls = (geminiClient.models.generateContent as any).mock.calls.filter(
-        (call: any) => !call[0].contents.includes('safety checker')
-      );
+      const translateCalls = (geminiClient.models.generateContent as any).mock.calls.filter(isTranslateCall);
       expect(translateCalls).toHaveLength(2);
       expect(translateCalls[0][0].config.cachedContent).toBe('cachedContents/test');
       expect(translateCalls[1][0].config).not.toHaveProperty('cachedContent');
@@ -518,9 +531,7 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('A later segment');
       await captionPromise2;
 
-      const translateCallsAfter = (geminiClient.models.generateContent as any).mock.calls.filter(
-        (call: any) => !call[0].contents.includes('safety checker')
-      );
+      const translateCallsAfter = (geminiClient.models.generateContent as any).mock.calls.filter(isTranslateCall);
       expect(translateCallsAfter).toHaveLength(3);
       expect(translateCallsAfter[2][0].config).not.toHaveProperty('cachedContent');
 
@@ -536,6 +547,9 @@ describe('wsServer', () => {
 
       let verifyCallCount = 0;
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
         if (params.contents.includes('safety checker')) {
           verifyCallCount += 1;
           if (verifyCallCount === 1) {
@@ -575,6 +589,123 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+    });
+  });
+
+  describe('transcription safety check', () => {
+    it('suppresses a flagged transcription from every viewer but still reports it to the capture socket', async () => {
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":false,"reason":"likely mis-heard negation"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: '{"zh":{"safe":true,"reason":"ok"}}' });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const viewerMessages: any[] = [];
+      viewerSocket.on('message', (data) => viewerMessages.push(JSON.parse(data.toString())));
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
+      const transcript = await transcriptPromise;
+
+      expect(transcript).toEqual({
+        type: 'transcript',
+        english: 'Jesus is not the son of God',
+        flagged: true,
+        reason: 'likely mis-heard negation',
+      });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('transcription_flagged'));
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(viewerMessages).toEqual([]);
+      expect(session.buffer.getRecent()).toHaveLength(0);
+
+      warnSpy.mockRestore();
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('runs the transcription check even with zero active viewers, keeping a flagged line out of the buffer', async () => {
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":false,"reason":"likely mis-heard negation"}' });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
+      await transcriptPromise;
+
+      expect(session.buffer.getRecent()).toHaveLength(0);
+      expect((geminiClient.models.generateContent as any).mock.calls).toHaveLength(1);
+
+      captureSocket.close();
+    });
+
+    it('does not mark a safe line as flagged in the transcript event', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const transcript = await transcriptPromise;
+
+      expect(transcript).toEqual({ type: 'transcript', english: 'Hello everyone' });
+
+      captureSocket.close();
+    });
+
+    it('suppresses the line when the transcription check fails after retry', async () => {
+      let transcriptionCallCount = 0;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          transcriptionCallCount += 1;
+          return Promise.reject(new Error('checker down'));
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const transcript = await transcriptPromise;
+
+      expect(transcript).toEqual({
+        type: 'transcript',
+        english: 'Hello everyone',
+        flagged: true,
+        reason: 'verification unavailable',
+      });
+      expect(transcriptionCallCount).toBe(2);
+      expect(session.buffer.getRecent()).toHaveLength(0);
+
+      captureSocket.close();
     });
   });
 });
