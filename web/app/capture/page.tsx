@@ -10,6 +10,8 @@ type CaptureStatus = 'idle' | 'recording' | 'reconnecting' | 'error';
 export default function CapturePage() {
   const [status, setStatus] = useState<CaptureStatus>('idle');
   const [transcriptLines, setTranscriptLines] = useState<{ text: string; flagged: boolean }[]>([]);
+  const [sessionCostUsd, setSessionCostUsd] = useState(0);
+  const [lifetimeCostUsd, setLifetimeCostUsd] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [hasUploadedDoc, setHasUploadedDoc] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -131,6 +133,9 @@ export default function CapturePage() {
           ...previous.slice(-49),
           { text: message.english, flagged: Boolean(message.flagged) },
         ]);
+      } else if (message.type === 'cost') {
+        setSessionCostUsd(message.sessionUsd);
+        setLifetimeCostUsd(message.lifetimeUsd);
       }
     };
 
@@ -152,6 +157,7 @@ export default function CapturePage() {
   function start() {
     manuallyStoppedRef.current = false;
     setErrorMessage(null);
+    setSessionCostUsd(0);
     connectSocket();
   }
 
@@ -202,6 +208,9 @@ export default function CapturePage() {
         </button>
       </div>
       <p className="text-sm text-muted-foreground">Status: {status}</p>
+      <p className="text-sm text-muted-foreground">
+        Session: ${sessionCostUsd.toFixed(4)} · Lifetime: ${lifetimeCostUsd.toFixed(2)}
+      </p>
       {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
       <div className="w-full max-w-xl h-64 overflow-y-auto border rounded p-3 text-sm space-y-1">
         {transcriptLines.map((line, index) => (
