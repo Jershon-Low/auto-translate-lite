@@ -65,4 +65,11 @@ describe('Session', () => {
     expect(session.isActive).toBe(false);
     expect(session.buffer.getRecent(0)).toHaveLength(1);
   });
+
+  it('start() clears any previous sermon cache reference', () => {
+    const session = new Session();
+    session.sermonCache = { name: 'cachedContents/old' };
+    session.start();
+    expect(session.sermonCache).toBeNull();
+  });
 });

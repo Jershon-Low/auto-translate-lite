@@ -1,17 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import { TranscriptBuffer } from './transcriptBuffer.js';
+import type { SermonCacheRef } from './gemini.js';
 
 export class Session {
   id: string = randomUUID();
   isActive: boolean = false;
   buffer: TranscriptBuffer = new TranscriptBuffer();
+  sermonCache: SermonCacheRef | null = null;
   private viewers: Map<WebSocket, string> = new Map();
 
   start(): void {
     this.id = randomUUID();
     this.isActive = true;
     this.buffer.clear();
+    this.sermonCache = null;
   }
 
   stop(): void {
