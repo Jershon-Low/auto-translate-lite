@@ -9,7 +9,7 @@ type CaptureStatus = 'idle' | 'recording' | 'reconnecting' | 'error';
 
 export default function CapturePage() {
   const [status, setStatus] = useState<CaptureStatus>('idle');
-  const [transcriptLines, setTranscriptLines] = useState<string[]>([]);
+  const [transcriptLines, setTranscriptLines] = useState<{ text: string; flagged: boolean }[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [hasUploadedDoc, setHasUploadedDoc] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -127,7 +127,10 @@ export default function CapturePage() {
       if (message.type === 'status') {
         setStatus(message.status);
       } else if (message.type === 'transcript') {
-        setTranscriptLines((previous) => [...previous.slice(-49), message.english]);
+        setTranscriptLines((previous) => [
+          ...previous.slice(-49),
+          { text: message.english, flagged: Boolean(message.flagged) },
+        ]);
       }
     };
 
@@ -202,7 +205,9 @@ export default function CapturePage() {
       {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
       <div className="w-full max-w-xl h-64 overflow-y-auto border rounded p-3 text-sm space-y-1">
         {transcriptLines.map((line, index) => (
-          <p key={index}>{line}</p>
+          <p key={index} className={line.flagged ? 'text-destructive line-through' : undefined}>
+            {line.text}
+          </p>
         ))}
       </div>
 
