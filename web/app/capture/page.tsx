@@ -25,6 +25,7 @@ export default function CapturePage() {
   const manuallyStoppedRef = useRef(false);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     fetch(`${API_URL}/feedback`)
@@ -32,6 +33,11 @@ export default function CapturePage() {
       .then((data) => setFeedbackText(data.text ?? ''))
       .catch(() => setFeedbackText(''));
   }, []);
+
+  useEffect(() => {
+    const container = transcriptRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  }, [transcriptLines]);
 
   async function uploadSermonDoc(file: File) {
     setIsUploading(true);
@@ -212,7 +218,7 @@ export default function CapturePage() {
         Session: ${sessionCostUsd.toFixed(4)} · Lifetime: ${lifetimeCostUsd.toFixed(2)}
       </p>
       {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
-      <div className="w-full max-w-xl h-64 overflow-y-auto border rounded p-3 text-sm space-y-1">
+      <div ref={transcriptRef} className="w-full max-w-xl h-64 overflow-y-auto border rounded p-3 text-sm space-y-1">
         {transcriptLines.map((line, index) => (
           <p key={index} className={line.flagged ? 'text-destructive line-through' : undefined}>
             {line.text}

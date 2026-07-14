@@ -110,7 +110,7 @@ export function createDeepgramConnection(
     utterance_end_ms: 1000,
     encoding: 'opus',
     mimetype: 'audio/webm',
-    keyterm: ['Planetshakers'],
+    keyterm: ['Planetshakers', 'CIEL'],
   });
 
   const router = createUtteranceRouter(callbacks.onFinalSegment);
