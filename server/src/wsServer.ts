@@ -8,6 +8,7 @@ import type { DeepgramConnection, DeepgramConnectionFactory } from './deepgram.j
 import { createSermonContextCache, deleteSermonContextCache } from './sermonCache.js';
 import type { SermonDocStore } from './sermonDocStore.js';
 import type { FeedbackStore } from './feedbackStore.js';
+import type { CostTracker } from './costTracker.js';
 import { logEvent } from './logger.js';
 
 export interface WsServerDeps {
@@ -18,6 +19,7 @@ export interface WsServerDeps {
   createDeepgramConnection: DeepgramConnectionFactory;
   sermonDocStore: SermonDocStore;
   feedbackStore: FeedbackStore;
+  costTracker: CostTracker;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
@@ -46,6 +48,16 @@ export function attachWsServer(deps: WsServerDeps): void {
 function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
   let deepgramConnection: DeepgramConnection | null = null;
   let processingQueue: Promise<void> = Promise.resolve();
+  let recordingStartedAt: number | null = null;
+  let unsubscribeCost: (() => void) | null = null;
+
+  function finalizeDeepgramCost(): void {
+    if (recordingStartedAt !== null) {
+      const elapsedSeconds = (Date.now() - recordingStartedAt) / 1000;
+      deps.costTracker.recordDeepgramSeconds(elapsedSeconds);
+      recordingStartedAt = null;
+    }
+  }
 
   ws.on('message', (data, isBinary) => {
     void (async () => {
@@ -82,7 +94,13 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
               },
               onClose: () => {},
             });
+            recordingStartedAt = Date.now();
             ws.send(JSON.stringify({ type: 'status', status: 'recording' }));
+
+            deps.costTracker.resetSession();
+            unsubscribeCost = deps.costTracker.onUpdate((sessionUsd, lifetimeUsd) => {
+              ws.send(JSON.stringify({ type: 'cost', sessionUsd, lifetimeUsd }));
+            });
           } else if (message.type === 'stop') {
             deps.session.stop();
             await deleteSermonContextCache(deps.geminiClient, deps.session.sermonCache);
@@ -90,6 +108,10 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             deepgramConnection?.finish();
             deepgramConnection = null;
             ws.send(JSON.stringify({ type: 'status', status: 'idle' }));
+
+            finalizeDeepgramCost();
+            unsubscribeCost?.();
+            unsubscribeCost = null;
           }
         } else if (deepgramConnection) {
           deepgramConnection.send(data as Buffer);
@@ -109,6 +131,12 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
       deps.session.sermonCache = null;
     });
     deepgramConnection?.finish();
+
+    // Unsubscribe before finalizing: the socket is already closed by the time
+    // this event fires, so the cost-update listener must not attempt a send.
+    unsubscribeCost?.();
+    unsubscribeCost = null;
+    finalizeDeepgramCost();
   });
 }
 

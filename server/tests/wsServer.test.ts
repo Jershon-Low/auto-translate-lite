@@ -8,6 +8,7 @@ import type { DeepgramCallbacks } from '../src/deepgram';
 import { createSermonDocStore } from '../src/sermonDocStore';
 import type { SermonDocStore } from '../src/sermonDocStore';
 import type { FeedbackStore } from '../src/feedbackStore';
+import type { CostTracker } from '../src/costTracker';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -51,6 +52,30 @@ function fakeFeedbackStore(text = ''): FeedbackStore {
   return { read: vi.fn().mockResolvedValue(text), write: vi.fn().mockResolvedValue(undefined) };
 }
 
+function fakeCostTracker(): CostTracker & { listeners: Set<(sessionUsd: number, lifetimeUsd: number) => void> } {
+  let sessionUsd = 0;
+  let lifetimeUsd = 0;
+  const listeners = new Set<(sessionUsd: number, lifetimeUsd: number) => void>();
+  return {
+    listeners,
+    recordGeminiUsage: vi.fn(),
+    recordDeepgramSeconds: vi.fn((seconds: number) => {
+      sessionUsd += seconds * 0.001;
+      lifetimeUsd += seconds * 0.001;
+      for (const listener of listeners) listener(sessionUsd, lifetimeUsd);
+    }),
+    resetSession: vi.fn(() => {
+      sessionUsd = 0;
+    }),
+    getSessionCostUsd: vi.fn(() => sessionUsd),
+    getLifetimeCostUsd: vi.fn(() => lifetimeUsd),
+    onUpdate: vi.fn((listener: (sessionUsd: number, lifetimeUsd: number) => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }),
+  };
+}
+
 function isTranslateCall(call: any): boolean {
   const contents = call[0].contents as string;
   return !contents.includes('safety checker') && !contents.includes('transcription accuracy checker');
@@ -74,6 +99,7 @@ describe('wsServer', () => {
   let geminiClient: GeminiClient;
   let sermonDocStore: SermonDocStore;
   let feedbackStore: FeedbackStore;
+  let costTracker: ReturnType<typeof fakeCostTracker>;
 
   beforeEach(async () => {
     session = new Session();
@@ -83,6 +109,7 @@ describe('wsServer', () => {
     geminiClient = fakeGeminiClient();
     sermonDocStore = createSermonDocStore();
     feedbackStore = fakeFeedbackStore();
+    costTracker = fakeCostTracker();
 
     attachWsServer({
       httpServer,
@@ -95,6 +122,7 @@ describe('wsServer', () => {
       },
       sermonDocStore,
       feedbackStore,
+      costTracker,
     });
 
     await new Promise<void>((resolve) => httpServer.listen(0, resolve));
@@ -754,6 +782,114 @@ describe('wsServer', () => {
       expect(lines).toEqual(['First segment', 'Second segment']);
 
       captureSocket.close();
+    });
+  });
+
+  describe('cost tracking', () => {
+    it('resets the session cost tracker and subscribes to updates when a capture session starts', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      expect(costTracker.resetSession).toHaveBeenCalledTimes(1);
+      expect(costTracker.onUpdate).toHaveBeenCalledTimes(1);
+
+      captureSocket.close();
+    });
+
+    it('sends a cost update to the capture socket whenever the tracker reports new totals', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const costPromise = waitForMessage(captureSocket);
+      for (const listener of costTracker.listeners) listener(0.0032, 14.82);
+      const cost = await costPromise;
+
+      expect(cost).toEqual({ type: 'cost', sessionUsd: 0.0032, lifetimeUsd: 14.82 });
+
+      captureSocket.close();
+    });
+
+    it('sends status:idle before the final cost update on stop, and records Deepgram seconds', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      // The 'stop' handler sends the idle status and the final cost update
+      // back-to-back in the same synchronous tick, so two sequential
+      // `waitForMessage` (`once('message', ...)`) calls race: the `ws` client
+      // can emit both 'message' events before the second listener is
+      // registered, losing the cost update and hanging the test. Collecting
+      // via a persistent listener avoids that race.
+      const messages: any[] = [];
+      captureSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      captureSocket.send(JSON.stringify({ type: 'stop' }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(messages[0]).toEqual({ type: 'status', status: 'idle' });
+      expect(messages[1]?.type).toBe('cost');
+
+      expect(costTracker.recordDeepgramSeconds).toHaveBeenCalledTimes(1);
+      const elapsedSeconds = (costTracker.recordDeepgramSeconds as any).mock.calls[0][0];
+      expect(elapsedSeconds).toBeGreaterThanOrEqual(0);
+      expect(elapsedSeconds).toBeLessThan(5);
+
+      captureSocket.close();
+    });
+
+    it('stops sending cost updates after stop, even if the tracker fires again', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      // See the note above: collect via a persistent listener instead of two
+      // sequential `waitForMessage` calls, since the idle status and final
+      // cost update are sent synchronously back-to-back.
+      const messages: any[] = [];
+      captureSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      captureSocket.send(JSON.stringify({ type: 'stop' }));
+      await new Promise((resolve) => setTimeout(resolve, 50)); // status: idle, then final cost update
+
+      expect(messages.map((message) => message.type)).toEqual(['status', 'cost']);
+      expect(costTracker.listeners.size).toBe(0);
+
+      captureSocket.close();
+    });
+
+    it('records Deepgram seconds on an abrupt close without an explicit stop', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      captureSocket.close();
+      // The server-side 'close' event fires only after the WebSocket close
+      // handshake completes real socket I/O (a few ms even on loopback), so
+      // a single `setImmediate` isn't enough to observe it reliably.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(costTracker.recordDeepgramSeconds).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not double-record Deepgram seconds when close fires after an explicit stop', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      captureSocket.send(JSON.stringify({ type: 'stop' }));
+      await new Promise((resolve) => setTimeout(resolve, 50)); // status: idle, then final cost update
+      captureSocket.close();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(costTracker.recordDeepgramSeconds).toHaveBeenCalledTimes(1);
     });
   });
 });
