@@ -57,6 +57,8 @@ Both external APIs are pay-as-you-go with no fixed minimum, and cost is driven b
 
 For a typical church running one ~60-minute translated service a week, that's **roughly $3.50–$5/month in API usage** — the AWS free tier (or a ~$5–10/month VPS after it expires) covers hosting on top of that. There's no seat licensing, no per-viewer surcharge, and no cost incurred outside of active Start/Stop sessions.
 
+The server also tracks this live: every Gemini call's real token usage (from the API response's `usageMetadata`, not an estimate) and every session's Deepgram streaming duration are converted to dollars using the rates below and shown as a running session/lifetime total on the capture page, persisted to `server/data/cost.json`. The table above is the *a priori* estimate; the capture page shows the *actual* running total for real usage.
+
 *(Pricing verified against Deepgram's and Google's published rates as of mid-2026; actual token usage will vary with sentence count and how many languages are simultaneously active. The system logs every call, so real usage is easy to audit against these estimates once deployed.)*
 
 *(This table doesn't yet include the separate transcription accuracy check described under "Safety features" — unlike the translation and verification calls above, it runs on every sentence of the session regardless of whether a viewer is connected, so its marginal cost doesn't scale with active-language count the way this table assumes. Real-world impact depends on how much of a service runs with zero viewers connected — e.g. pre-service, or during a hymn before anyone's tuned in — so it's better re-derived from the "log every call" audit trail once deployed than estimated blind here.)*
