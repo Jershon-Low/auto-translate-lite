@@ -708,4 +708,52 @@ describe('wsServer', () => {
       captureSocket.close();
     });
   });
+
+  describe('segment processing order', () => {
+    it('processes segments strictly in arrival order even if a later segment finishes its Gemini calls first', async () => {
+      let resolveFirst!: (value: { text: string }) => void;
+      const firstPending = new Promise<{ text: string }>((resolve) => {
+        resolveFirst = resolve;
+      });
+
+      // Both segments only go through the transcription-safety check here,
+      // since no viewer is subscribed (translateWithFallback short-circuits
+      // without calling Gemini when there are no active languages). The first
+      // segment's check is held pending while the second segment's resolves
+      // immediately, simulating a Gemini latency spike that lets the second
+      // segment "win the race" despite arriving after the first.
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('Line: "First segment"')) {
+          return firstPending;
+        }
+        return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      // Fired back-to-back with no await in between, matching the real
+      // fire-and-forget `onFinalSegment` callback wiring.
+      capturedCallbacks!.onFinalSegment('First segment');
+      capturedCallbacks!.onFinalSegment('Second segment');
+
+      // Give the second segment's (fast) Gemini call a chance to resolve and
+      // be processed while the first segment's call is still pending.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      // Without serialization, "Second segment" would already be appended
+      // here even though "First segment" arrived first and hasn't finished.
+      expect(session.buffer.getRecent()).toHaveLength(0);
+
+      resolveFirst({ text: '{"safe":true,"reason":"ok"}' });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      const lines = session.buffer.getRecent().map((line) => line.english);
+      expect(lines).toEqual(['First segment', 'Second segment']);
+
+      captureSocket.close();
+    });
+  });
 });

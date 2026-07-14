@@ -45,6 +45,7 @@ export function attachWsServer(deps: WsServerDeps): void {
 
 function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
   let deepgramConnection: DeepgramConnection | null = null;
+  let processingQueue: Promise<void> = Promise.resolve();
 
   ws.on('message', (data, isBinary) => {
     void (async () => {
@@ -66,7 +67,15 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
 
             deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
               onFinalSegment: (text) => {
-                void handleFinalSegment(text, deps, ws);
+                processingQueue = processingQueue
+                  .then(() => handleFinalSegment(text, deps, ws))
+                  .catch((error) => {
+                    void logEvent('error', {
+                      event: 'segment_processing_failed',
+                      english: text,
+                      error: error instanceof Error ? error.message : String(error),
+                    });
+                  });
               },
               onError: () => {
                 ws.send(JSON.stringify({ type: 'status', status: 'error' }));
