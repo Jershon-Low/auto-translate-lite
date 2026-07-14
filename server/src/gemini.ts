@@ -4,6 +4,12 @@ export interface SermonCacheRef {
   name: string;
 }
 
+export interface GeminiUsageMetadata {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  cachedContentTokenCount?: number;
+}
+
 export interface GeminiClient {
   models: {
     generateContent(params: {
@@ -14,7 +20,7 @@ export interface GeminiClient {
         responseSchema: Record<string, unknown>;
         cachedContent?: string;
       };
-    }): Promise<{ text: string | null | undefined }>;
+    }): Promise<{ text: string | null | undefined; usageMetadata?: GeminiUsageMetadata }>;
   };
   caches: {
     create(params: {
