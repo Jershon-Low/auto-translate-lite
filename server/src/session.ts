@@ -42,4 +42,8 @@ export class Session {
       .filter(([, viewerLanguage]) => viewerLanguage === language)
       .map(([socket]) => socket);
   }
+
+  getAllViewers(): WebSocket[] {
+    return Array.from(this.viewers.keys());
+  }
 }

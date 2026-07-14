@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 export interface CaptionLine {
   english: string;
   translated: string;
+  removed?: boolean;
 }
 
 export type ViewerStatus = 'connecting' | 'reconnecting' | 'live';
@@ -37,6 +38,9 @@ export function useViewerSocket(language: string, wsUrl: string) {
             ...previous,
             { english: message.english, translated: message.translated },
           ]);
+          setStatus('live');
+        } else if (message.type === 'line-removed') {
+          setLines((previous) => [...previous, { english: '', translated: '', removed: true }]);
           setStatus('live');
         }
       };

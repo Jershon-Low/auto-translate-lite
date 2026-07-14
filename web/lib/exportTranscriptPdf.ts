@@ -30,6 +30,17 @@ function buildTranscriptElement(
   container.appendChild(meta);
 
   for (const line of lines) {
+    if (line.removed) {
+      const removedEl = document.createElement('p');
+      removedEl.textContent = '— Line removed —';
+      removedEl.style.fontSize = '12px';
+      removedEl.style.fontStyle = 'italic';
+      removedEl.style.color = '#999999';
+      removedEl.style.margin = '0 0 16px 0';
+      container.appendChild(removedEl);
+      continue;
+    }
+
     const englishEl = document.createElement('p');
     englishEl.textContent = line.english;
     englishEl.style.fontSize = '12px';

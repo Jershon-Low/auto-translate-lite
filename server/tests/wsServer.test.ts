@@ -621,7 +621,7 @@ describe('wsServer', () => {
   });
 
   describe('transcription safety check', () => {
-    it('suppresses a flagged transcription from every viewer but still reports it to the capture socket', async () => {
+    it('notifies every viewer of a line removal, and still reports the flag to the capture socket', async () => {
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
         if (params.contents.includes('transcription accuracy checker')) {
           return Promise.resolve({ text: '{"safe":false,"reason":"likely mis-heard negation"}' });
@@ -659,7 +659,7 @@ describe('wsServer', () => {
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('transcription_flagged'));
 
       await new Promise((resolve) => setImmediate(resolve));
-      expect(viewerMessages).toEqual([]);
+      expect(viewerMessages).toEqual([{ type: 'line-removed' }]);
       expect(session.buffer.getRecent()).toHaveLength(0);
 
       warnSpy.mockRestore();

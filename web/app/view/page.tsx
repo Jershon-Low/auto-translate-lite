@@ -87,12 +87,20 @@ function ViewerPageContent() {
       </div>
       {exportError && <p className="px-3 pt-2 text-sm text-destructive">{exportError}</p>}
       <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-4">
-        {lines.map((line, index) => (
-          <div key={index}>
-            <p className="text-sm text-muted-foreground">{line.english}</p>
-            <p className="text-xl">{line.translated}</p>
-          </div>
-        ))}
+        {lines.map((line, index) =>
+          line.removed ? (
+            <div key={index} className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="flex-1 border-t border-dashed" />
+              <span>Line removed</span>
+              <span className="flex-1 border-t border-dashed" />
+            </div>
+          ) : (
+            <div key={index}>
+              <p className="text-sm text-muted-foreground">{line.english}</p>
+              <p className="text-xl">{line.translated}</p>
+            </div>
+          )
+        )}
         <div ref={bottomRef} />
       </div>
       {showJumpButton && (

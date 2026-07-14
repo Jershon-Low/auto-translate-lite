@@ -169,6 +169,10 @@ async function handleFinalSegment(
     captureSocket.send(
       JSON.stringify({ type: 'transcript', english, flagged: true, reason: transcriptionResult.reason })
     );
+    const removedPayload = JSON.stringify({ type: 'line-removed' });
+    for (const viewerSocket of deps.session.getAllViewers()) {
+      viewerSocket.send(removedPayload);
+    }
     return;
   }
 
