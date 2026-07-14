@@ -16,6 +16,7 @@ export default function CapturePage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [feedbackText, setFeedbackText] = useState('');
   const [feedbackSaveStatus, setFeedbackSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -37,9 +38,15 @@ export default function CapturePage() {
       const formData = new FormData();
       formData.append('file', file);
       const response = await fetch(`${API_URL}/sermon-doc`, { method: 'POST', body: formData });
-      const data = await response.json();
       if (!response.ok) {
-        setUploadError(data.error ?? 'Upload failed');
+        let message = `Upload failed (status ${response.status})`;
+        try {
+          const data = await response.json();
+          message = data.error ?? message;
+        } catch {
+          // Non-JSON error body; fall back to the status-code-based message.
+        }
+        setUploadError(message);
         setHasUploadedDoc(false);
         return;
       }
@@ -63,14 +70,21 @@ export default function CapturePage() {
       if (!confirmed) return;
     }
     setFeedbackSaveStatus('saving');
+    setFeedbackError(null);
     try {
-      await fetch(`${API_URL}/feedback`, {
+      const response = await fetch(`${API_URL}/feedback`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: feedbackText }),
       });
+      if (!response.ok) {
+        setFeedbackError(`Save failed (status ${response.status}). Check your connection and try again.`);
+        setFeedbackSaveStatus('idle');
+        return;
+      }
       setFeedbackSaveStatus('saved');
     } catch {
+      setFeedbackError('Save failed. Check your connection and try again.');
       setFeedbackSaveStatus('idle');
     }
   }
@@ -214,6 +228,7 @@ export default function CapturePage() {
           </button>
           {feedbackSaveStatus === 'saved' && <p className="text-sm text-green-600">Saved.</p>}
         </div>
+        {feedbackError && <p className="text-sm text-destructive">{feedbackError}</p>}
       </div>
     </main>
   );
