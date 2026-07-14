@@ -154,7 +154,7 @@ describe('wsServer', () => {
     viewerSocket.close();
   });
 
-  it('includes up to the last 3 preceding lines as translation context', async () => {
+  it('includes up to the last 7 preceding lines as translation context', async () => {
     const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
     await waitForOpen(captureSocket);
     captureSocket.send(JSON.stringify({ type: 'start' }));
@@ -165,20 +165,28 @@ describe('wsServer', () => {
     viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
     await waitForMessage(viewerSocket); // backlog: []
 
-    session.buffer.append('First line', Date.now());
-    session.buffer.append('Second line', Date.now());
-    session.buffer.append('Third line', Date.now());
-    session.buffer.append('Fourth line', Date.now());
+    session.buffer.append('Line 1', Date.now());
+    session.buffer.append('Line 2', Date.now());
+    session.buffer.append('Line 3', Date.now());
+    session.buffer.append('Line 4', Date.now());
+    session.buffer.append('Line 5', Date.now());
+    session.buffer.append('Line 6', Date.now());
+    session.buffer.append('Line 7', Date.now());
+    session.buffer.append('Line 8', Date.now());
 
     const captionPromise = waitForMessage(viewerSocket);
-    capturedCallbacks!.onFinalSegment('Fifth line');
+    capturedCallbacks!.onFinalSegment('Line 9');
     await captionPromise;
 
     const translateCall = (geminiClient.models.generateContent as any).mock.calls.find(isTranslateCall);
-    expect(translateCall[0].contents).toContain('Second line');
-    expect(translateCall[0].contents).toContain('Third line');
-    expect(translateCall[0].contents).toContain('Fourth line');
-    expect(translateCall[0].contents).not.toContain('First line');
+    expect(translateCall[0].contents).toContain('Line 2');
+    expect(translateCall[0].contents).toContain('Line 3');
+    expect(translateCall[0].contents).toContain('Line 4');
+    expect(translateCall[0].contents).toContain('Line 5');
+    expect(translateCall[0].contents).toContain('Line 6');
+    expect(translateCall[0].contents).toContain('Line 7');
+    expect(translateCall[0].contents).toContain('Line 8');
+    expect(translateCall[0].contents).not.toContain('Line 1');
 
     captureSocket.close();
     viewerSocket.close();

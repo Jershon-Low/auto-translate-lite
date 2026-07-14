@@ -11,6 +11,8 @@ import type { FeedbackStore } from './feedbackStore.js';
 import type { CostTracker } from './costTracker.js';
 import { logEvent } from './logger.js';
 
+const PRECEDING_CONTEXT_LINES = 7;
+
 export interface WsServerDeps {
   httpServer: HttpServer;
   session: Session;
@@ -155,7 +157,7 @@ async function handleFinalSegment(
   captureSocket: WebSocket
 ): Promise<void> {
   const recentLines = deps.session.buffer.getRecent();
-  const precedingContext = recentLines.slice(-3).map((recentLine) => recentLine.english);
+  const precedingContext = recentLines.slice(-PRECEDING_CONTEXT_LINES).map((recentLine) => recentLine.english);
   const sermonCache = deps.session.sermonCache;
   const activeLanguages = deps.session.getActiveLanguages();
 
