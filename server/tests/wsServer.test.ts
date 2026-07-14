@@ -383,7 +383,7 @@ describe('wsServer', () => {
 
       expect(geminiClient.caches.create).toHaveBeenCalledTimes(1);
       expect(session.sermonCache).toEqual({ name: 'cachedContents/test' });
-      expect(sermonDocStore.get()).toBeNull();
+      expect(sermonDocStore.get()).not.toBeNull();
 
       const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
       await waitForOpen(viewerSocket);
@@ -431,6 +431,31 @@ describe('wsServer', () => {
 
       expect(geminiClient.caches.delete).toHaveBeenCalledWith({ name: 'cachedContents/test' });
       expect(session.sermonCache).toBeNull();
+
+      captureSocket.close();
+    });
+
+    it('rebuilds the cache on a second start (reconnect) since the sermon doc is no longer consumed', async () => {
+      sermonDocStore.set(
+        'This week: the story of Cain and Abel. Genesis chapter four covers jealousy, ' +
+          "the first murder, and God's response to Cain after he kills his brother out in the field."
+      );
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+      expect(geminiClient.caches.create).toHaveBeenCalledTimes(1);
+      expect(sermonDocStore.get()).not.toBeNull();
+
+      // Simulate a client auto-reconnect: it re-sends 'start' on the same
+      // logical flow without a new document upload.
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      expect(geminiClient.caches.create).toHaveBeenCalledTimes(2);
+      expect(session.sermonCache).toEqual({ name: 'cachedContents/test' });
 
       captureSocket.close();
     });

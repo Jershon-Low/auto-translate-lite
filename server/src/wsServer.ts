@@ -60,7 +60,6 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                 feedbackText,
                 sermonText
               );
-              deps.sermonDocStore.clear();
             }
 
             deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
