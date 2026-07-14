@@ -28,6 +28,10 @@ function fakeGeminiClient(overrides: { translate?: string; verify?: string } = {
         return Promise.resolve({ text: translateText });
       }),
     },
+    caches: {
+      create: vi.fn().mockResolvedValue({ name: 'cachedContents/test' }),
+      delete: vi.fn().mockResolvedValue(undefined),
+    },
   };
 }
 

@@ -1,12 +1,27 @@
 import { GoogleGenAI } from '@google/genai';
 
+export interface SermonCacheRef {
+  name: string;
+}
+
 export interface GeminiClient {
   models: {
     generateContent(params: {
       model: string;
       contents: string;
-      config: { responseMimeType: string; responseSchema: Record<string, unknown> };
+      config: {
+        responseMimeType: string;
+        responseSchema: Record<string, unknown>;
+        cachedContent?: string;
+      };
     }): Promise<{ text: string | null | undefined }>;
+  };
+  caches: {
+    create(params: {
+      model: string;
+      config: { systemInstruction: string; ttl: string; displayName?: string };
+    }): Promise<{ name?: string }>;
+    delete(params: { name: string }): Promise<void>;
   };
 }
 

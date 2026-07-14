@@ -6,6 +6,10 @@ function fakeClient(responseText: string): GeminiClient {
     models: {
       generateContent: vi.fn().mockResolvedValue({ text: responseText }),
     },
+    caches: {
+      create: vi.fn(),
+      delete: vi.fn(),
+    },
   };
 }
 
