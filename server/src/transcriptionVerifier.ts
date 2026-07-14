@@ -25,6 +25,9 @@ export async function verifyTranscription(
 
 Do NOT flag a line just because it is idiomatic, informal, or grammatically rough — this sermon includes Australian slang, jokes, and dry humor (e.g. "no worries," "arvo," "having a go," "she'll be right"), and normal spoken imperfection is expected and not a sign of an error.
 
+Language Specific Notes:
+BAHASE INDONESIA: Do NOT flag a line just because it uses the word "Allah" — this is the correct word for God in Indonesian, and is not a misrepresentation of Christian belief.  
+
 Only mark it unsafe if the line, as transcribed, clearly and confidently misrepresents who God, Jesus, or the Holy Spirit is or does — the kind of thing a dropped or inserted "not" would cause.
 
 ${buildContextBlock(precedingContext)}Line: "${english}"
