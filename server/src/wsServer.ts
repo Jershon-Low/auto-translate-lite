@@ -7,6 +7,7 @@ import type { DeepgramConnection, DeepgramConnectionFactory } from './deepgram.j
 import { createSermonContextCache, deleteSermonContextCache } from './sermonCache.js';
 import type { SermonDocStore } from './sermonDocStore.js';
 import type { FeedbackStore } from './feedbackStore.js';
+import { logEvent } from './logger.js';
 
 export interface WsServerDeps {
   httpServer: HttpServer;
@@ -84,7 +85,10 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
           deepgramConnection.send(data as Buffer);
         }
       } catch (error) {
-        console.error('Error handling capture message:', error);
+        void logEvent('error', {
+          event: 'capture_message_error',
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     })();
   });
@@ -104,16 +108,7 @@ function logTranslationFallback(
   discardedTranslation: string,
   reason: string
 ): void {
-  console.warn(
-    JSON.stringify({
-      event: 'translation_fallback',
-      timestamp: new Date().toISOString(),
-      language,
-      english,
-      discardedTranslation,
-      reason,
-    })
-  );
+  void logEvent('warn', { event: 'translation_fallback', language, english, discardedTranslation, reason });
 }
 
 async function handleFinalSegment(
@@ -145,7 +140,11 @@ async function handleFinalSegment(
         null
       );
     } catch (secondError) {
-      console.error('Translation failed after retry, skipping segment:', secondError);
+      void logEvent('error', {
+        event: 'translation_failed',
+        english,
+        error: secondError instanceof Error ? secondError.message : String(secondError),
+      });
       return;
     }
   }
@@ -186,7 +185,10 @@ async function verifyTranslationsWithRetry(
     try {
       return await verifyTranslations(client, items, null);
     } catch (secondError) {
-      console.error('Verification failed after retry, treating all as unverified:', secondError);
+      void logEvent('error', {
+        event: 'verification_failed',
+        error: secondError instanceof Error ? secondError.message : String(secondError),
+      });
       return {};
     }
   }
@@ -244,7 +246,10 @@ function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
           deps.session.addViewer(ws, language);
         }
       } catch (error) {
-        console.error('Error handling viewer message:', error);
+        void logEvent('error', {
+          event: 'viewer_message_error',
+          error: error instanceof Error ? error.message : String(error),
+        });
         ws.send(JSON.stringify({ type: 'backlog', lines: [] }));
       }
     })();

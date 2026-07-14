@@ -5,6 +5,10 @@ import {
   deleteSermonContextCache,
 } from '../src/sermonCache';
 import type { GeminiClient } from '../src/gemini';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+process.env.LOG_FILE_PATH = join(tmpdir(), 'auto-translate-lite-test-events.log');
 
 function fakeClientWithCaches(
   overrides: { createResult?: { name?: string }; createError?: Error } = {}

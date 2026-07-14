@@ -169,7 +169,7 @@ export default function CapturePage() {
       <h1 className="text-xl font-semibold">Sermon Capture</h1>
 
       <div className="w-full max-w-xl flex flex-col gap-2">
-        <label className="text-sm font-medium">Sermon document (required, PDF or Word)</label>
+        <label className="text-sm font-medium">Sermon document (optional, PDF or Word)</label>
         <input
           ref={fileInputRef}
           type="file"
@@ -185,7 +185,7 @@ export default function CapturePage() {
       <div className="flex gap-4">
         <button
           onClick={start}
-          disabled={status === 'recording' || status === 'reconnecting' || !hasUploadedDoc}
+          disabled={status === 'recording' || status === 'reconnecting'}
           className="bg-primary text-primary-foreground px-4 py-2 rounded disabled:opacity-50"
         >
           Start

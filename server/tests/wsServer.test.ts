@@ -8,6 +8,10 @@ import type { DeepgramCallbacks } from '../src/deepgram';
 import { createSermonDocStore } from '../src/sermonDocStore';
 import type { SermonDocStore } from '../src/sermonDocStore';
 import type { FeedbackStore } from '../src/feedbackStore';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+process.env.LOG_FILE_PATH = join(tmpdir(), 'auto-translate-lite-test-events.log');
 
 function fakeGeminiClient(overrides: { translate?: string; verify?: string } = {}): GeminiClient {
   const translateText = overrides.translate ?? '{"zh":"你好"}';

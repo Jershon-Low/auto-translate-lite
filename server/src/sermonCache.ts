@@ -1,4 +1,5 @@
 import type { GeminiClient, SermonCacheRef } from './gemini.js';
+import { logEvent } from './logger.js';
 
 const MODEL = 'gemini-3.1-flash-lite';
 const CACHE_TTL = '7200s';
@@ -33,7 +34,10 @@ export async function createSermonContextCache(
     });
     return cache.name ? { name: cache.name } : null;
   } catch (error) {
-    console.error('Failed to create sermon context cache, continuing without it:', error);
+    void logEvent('error', {
+      event: 'sermon_cache_create_failed',
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -46,6 +50,9 @@ export async function deleteSermonContextCache(
   try {
     await client.caches.delete({ name: cacheRef.name });
   } catch (error) {
-    console.error('Failed to delete sermon context cache:', error);
+    void logEvent('error', {
+      event: 'sermon_cache_delete_failed',
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
