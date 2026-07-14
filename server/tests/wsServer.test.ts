@@ -5,6 +5,9 @@ import { attachWsServer } from '../src/wsServer';
 import { Session } from '../src/session';
 import type { GeminiClient } from '../src/gemini';
 import type { DeepgramCallbacks } from '../src/deepgram';
+import { createSermonDocStore } from '../src/sermonDocStore';
+import type { SermonDocStore } from '../src/sermonDocStore';
+import type { FeedbackStore } from '../src/feedbackStore';
 
 function fakeGeminiClient(overrides: { translate?: string; verify?: string } = {}): GeminiClient {
   const translateText = overrides.translate ?? '{"zh":"你好"}';
@@ -35,6 +38,10 @@ function fakeGeminiClient(overrides: { translate?: string; verify?: string } = {
   };
 }
 
+function fakeFeedbackStore(text = ''): FeedbackStore {
+  return { read: vi.fn().mockResolvedValue(text), write: vi.fn().mockResolvedValue(undefined) };
+}
+
 function waitForMessage(ws: WebSocket): Promise<any> {
   return new Promise((resolve) => {
     ws.once('message', (data) => resolve(JSON.parse(data.toString())));
@@ -51,6 +58,8 @@ describe('wsServer', () => {
   let session: Session;
   let capturedCallbacks: DeepgramCallbacks | null;
   let geminiClient: GeminiClient;
+  let sermonDocStore: SermonDocStore;
+  let feedbackStore: FeedbackStore;
 
   beforeEach(async () => {
     session = new Session();
@@ -58,6 +67,8 @@ describe('wsServer', () => {
     httpServer = createServer();
 
     geminiClient = fakeGeminiClient();
+    sermonDocStore = createSermonDocStore();
+    feedbackStore = fakeFeedbackStore();
 
     attachWsServer({
       httpServer,
@@ -68,6 +79,8 @@ describe('wsServer', () => {
         capturedCallbacks = callbacks;
         return { send: vi.fn(), finish: vi.fn() };
       },
+      sermonDocStore,
+      feedbackStore,
     });
 
     await new Promise<void>((resolve) => httpServer.listen(0, resolve));
@@ -354,5 +367,72 @@ describe('wsServer', () => {
 
     captureSocket.close();
     viewerSocket.close();
+  });
+
+  describe('sermon context caching', () => {
+    it('creates a cache on start when a sermon document is pending, and passes it to translation calls', async () => {
+      sermonDocStore.set('This week: the story of Cain and Abel.');
+      (feedbackStore.read as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'Cain should translate to 该隐 in Chinese'
+      );
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      expect(geminiClient.caches.create).toHaveBeenCalledTimes(1);
+      expect(session.sermonCache).toEqual({ name: 'cachedContents/test' });
+      expect(sermonDocStore.get()).toBeNull();
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('Cain killed Abel');
+      await captionPromise;
+
+      const translateCall = (geminiClient.models.generateContent as any).mock.calls.find(
+        (call: any) => !call[0].contents.includes('safety checker')
+      );
+      expect(translateCall[0].config.cachedContent).toBe('cachedContents/test');
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('does not create a cache when no sermon document was uploaded', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket);
+
+      expect(geminiClient.caches.create).not.toHaveBeenCalled();
+      expect(session.sermonCache).toBeNull();
+
+      captureSocket.close();
+    });
+
+    it('deletes the cache on stop', async () => {
+      sermonDocStore.set(
+        'This week: the story of Cain and Abel. Genesis chapter four covers jealousy, ' +
+          "the first murder, and God's response to Cain after he kills his brother out in the field."
+      );
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket);
+
+      captureSocket.send(JSON.stringify({ type: 'stop' }));
+      await waitForMessage(captureSocket); // status: idle
+
+      expect(geminiClient.caches.delete).toHaveBeenCalledWith({ name: 'cachedContents/test' });
+      expect(session.sermonCache).toBeNull();
+
+      captureSocket.close();
+    });
   });
 });

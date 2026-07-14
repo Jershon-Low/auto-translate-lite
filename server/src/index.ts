@@ -5,6 +5,8 @@ import { attachWsServer } from './wsServer.js';
 import { Session } from './session.js';
 import { createGeminiClient } from './gemini.js';
 import { createDeepgramConnection } from './deepgram.js';
+import { createSermonDocStore } from './sermonDocStore.js';
+import { createFeedbackStore } from './feedbackStore.js';
 
 const requiredEnvVars = ['DEEPGRAM_API_KEY', 'GEMINI_API_KEY'] as const;
 for (const key of requiredEnvVars) {
@@ -13,10 +15,13 @@ for (const key of requiredEnvVars) {
   }
 }
 
-const app = createApp();
-const httpServer = createServer(app);
 const session = new Session();
 const geminiClient = createGeminiClient(process.env.GEMINI_API_KEY!);
+const sermonDocStore = createSermonDocStore();
+const feedbackStore = createFeedbackStore(process.env.FEEDBACK_FILE_PATH ?? 'data/feedback.txt');
+
+const app = createApp({ sermonDocStore, feedbackStore });
+const httpServer = createServer(app);
 
 attachWsServer({
   httpServer,
@@ -24,6 +29,8 @@ attachWsServer({
   geminiClient,
   deepgramApiKey: process.env.DEEPGRAM_API_KEY!,
   createDeepgramConnection,
+  sermonDocStore,
+  feedbackStore,
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;

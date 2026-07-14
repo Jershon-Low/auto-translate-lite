@@ -1,9 +1,12 @@
 import type { IncomingMessage, Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Session } from './session.js';
-import { translateSegment, translateBacklog, type GeminiClient } from './gemini.js';
+import { translateSegment, translateBacklog, type GeminiClient, type SermonCacheRef } from './gemini.js';
 import { verifyTranslations, type VerificationItem, type VerificationResult } from './translationVerifier.js';
 import type { DeepgramConnection, DeepgramConnectionFactory } from './deepgram.js';
+import { createSermonContextCache, deleteSermonContextCache } from './sermonCache.js';
+import type { SermonDocStore } from './sermonDocStore.js';
+import type { FeedbackStore } from './feedbackStore.js';
 
 export interface WsServerDeps {
   httpServer: HttpServer;
@@ -11,6 +14,8 @@ export interface WsServerDeps {
   geminiClient: GeminiClient;
   deepgramApiKey: string;
   createDeepgramConnection: DeepgramConnectionFactory;
+  sermonDocStore: SermonDocStore;
+  feedbackStore: FeedbackStore;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
@@ -40,37 +45,56 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
   let deepgramConnection: DeepgramConnection | null = null;
 
   ws.on('message', (data, isBinary) => {
-    try {
-      if (!isBinary) {
-        const message = JSON.parse(data.toString());
-        if (message.type === 'start') {
-          deps.session.start();
-          deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
-            onFinalSegment: (text) => {
-              void handleFinalSegment(text, deps, ws);
-            },
-            onError: () => {
-              ws.send(JSON.stringify({ type: 'status', status: 'error' }));
-            },
-            onClose: () => {},
-          });
-          ws.send(JSON.stringify({ type: 'status', status: 'recording' }));
-        } else if (message.type === 'stop') {
-          deps.session.stop();
-          deepgramConnection?.finish();
-          deepgramConnection = null;
-          ws.send(JSON.stringify({ type: 'status', status: 'idle' }));
+    void (async () => {
+      try {
+        if (!isBinary) {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'start') {
+            deps.session.start();
+
+            const sermonText = deps.sermonDocStore.get();
+            if (sermonText) {
+              const feedbackText = await deps.feedbackStore.read();
+              deps.session.sermonCache = await createSermonContextCache(
+                deps.geminiClient,
+                feedbackText,
+                sermonText
+              );
+              deps.sermonDocStore.clear();
+            }
+
+            deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
+              onFinalSegment: (text) => {
+                void handleFinalSegment(text, deps, ws);
+              },
+              onError: () => {
+                ws.send(JSON.stringify({ type: 'status', status: 'error' }));
+              },
+              onClose: () => {},
+            });
+            ws.send(JSON.stringify({ type: 'status', status: 'recording' }));
+          } else if (message.type === 'stop') {
+            deps.session.stop();
+            await deleteSermonContextCache(deps.geminiClient, deps.session.sermonCache);
+            deps.session.sermonCache = null;
+            deepgramConnection?.finish();
+            deepgramConnection = null;
+            ws.send(JSON.stringify({ type: 'status', status: 'idle' }));
+          }
+        } else if (deepgramConnection) {
+          deepgramConnection.send(data as Buffer);
         }
-      } else if (deepgramConnection) {
-        deepgramConnection.send(data as Buffer);
+      } catch (error) {
+        console.error('Error handling capture message:', error);
       }
-    } catch (error) {
-      console.error('Error handling capture message:', error);
-    }
+    })();
   });
 
   ws.on('close', () => {
     deps.session.stop();
+    void deleteSermonContextCache(deps.geminiClient, deps.session.sermonCache).then(() => {
+      deps.session.sermonCache = null;
+    });
     deepgramConnection?.finish();
   });
 }
@@ -106,13 +130,20 @@ async function handleFinalSegment(
 
   const recentLines = deps.session.buffer.getRecent();
   const precedingContext = recentLines.slice(-4, -1).map((recentLine) => recentLine.english);
+  const sermonCache = deps.session.sermonCache;
 
   let translations: Record<string, string>;
   try {
-    translations = await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext);
+    translations = await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext, sermonCache);
   } catch {
     try {
-      translations = await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext);
+      translations = await translateSegment(
+        deps.geminiClient,
+        english,
+        activeLanguages,
+        precedingContext,
+        sermonCache
+      );
     } catch (secondError) {
       console.error('Translation failed after retry, skipping segment:', secondError);
       return;
@@ -122,7 +153,7 @@ async function handleFinalSegment(
   const verificationItems: VerificationItem[] = activeLanguages
     .filter((language) => Boolean(translations[language]))
     .map((language) => ({ id: language, english, translated: translations[language] }));
-  const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems);
+  const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems, sermonCache);
 
   for (const language of activeLanguages) {
     const translated = translations[language];
@@ -145,14 +176,15 @@ async function handleFinalSegment(
 
 async function verifyTranslationsWithRetry(
   client: GeminiClient,
-  items: VerificationItem[]
+  items: VerificationItem[],
+  sermonCache: SermonCacheRef | null
 ): Promise<Record<string, VerificationResult>> {
   if (items.length === 0) return {};
   try {
-    return await verifyTranslations(client, items);
+    return await verifyTranslations(client, items, sermonCache);
   } catch {
     try {
-      return await verifyTranslations(client, items);
+      return await verifyTranslations(client, items, sermonCache);
     } catch (secondError) {
       console.error('Verification failed after retry, treating all as unverified:', secondError);
       return {};
@@ -189,7 +221,11 @@ function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
             .map((line, index) => ({ line, index }))
             .filter(({ line }) => line.translated.length > 0)
             .map(({ line, index }) => ({ id: String(index), english: line.english, translated: line.translated }));
-          const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems);
+          const verifications = await verifyTranslationsWithRetry(
+            deps.geminiClient,
+            verificationItems,
+            deps.session.sermonCache
+          );
 
           const verifiedLines = lines.map((line, index) => {
             if (line.translated.length === 0) return { english: line.english, translated: line.english };
