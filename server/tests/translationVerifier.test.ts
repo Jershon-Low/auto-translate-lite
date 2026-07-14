@@ -53,4 +53,22 @@ describe('verifyTranslations', () => {
     expect(result).toEqual({});
     expect(client.models.generateContent).not.toHaveBeenCalled();
   });
+
+  it('includes cachedContent in the request config when a sermon cache is provided', async () => {
+    const client = fakeClient('{"zh":{"safe":true,"reason":"ok"}}');
+    await verifyTranslations(
+      client,
+      [{ id: 'zh', english: 'Hello', translated: '你好' }],
+      { name: 'cachedContents/abc' }
+    );
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.config.cachedContent).toBe('cachedContents/abc');
+  });
+
+  it('omits cachedContent from the request config when no sermon cache is provided', async () => {
+    const client = fakeClient('{"zh":{"safe":true,"reason":"ok"}}');
+    await verifyTranslations(client, [{ id: 'zh', english: 'Hello', translated: '你好' }]);
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.config.cachedContent).toBeUndefined();
+  });
 });

@@ -1,4 +1,4 @@
-import type { GeminiClient } from './gemini.js';
+import type { GeminiClient, SermonCacheRef } from './gemini.js';
 
 export interface VerificationItem {
   id: string;
@@ -15,7 +15,8 @@ const MODEL = 'gemini-3.1-flash-lite';
 
 export async function verifyTranslations(
   client: GeminiClient,
-  items: VerificationItem[]
+  items: VerificationItem[],
+  sermonCache: SermonCacheRef | null = null
 ): Promise<Record<string, VerificationResult>> {
   if (items.length === 0) return {};
 
@@ -50,6 +51,7 @@ Return, for each id, whether it is safe and a short reason.`,
     config: {
       responseMimeType: 'application/json',
       responseSchema: { type: 'object', properties, required: items.map((item) => item.id) },
+      ...(sermonCache ? { cachedContent: sermonCache.name } : {}),
     },
   });
 
