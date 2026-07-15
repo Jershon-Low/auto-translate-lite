@@ -67,9 +67,15 @@ sudo apt install -y caddy
 ```
 54-123-45-67.sslip.io {
   reverse_proxy /ws/* localhost:3001
+  reverse_proxy /health localhost:3001
+  reverse_proxy /sermon-doc localhost:3001
+  reverse_proxy /feedback localhost:3001
+  reverse_proxy /viewer-feedback* localhost:3001
   reverse_proxy localhost:3000
 }
 ```
+
+Every REST endpoint the backend exposes needs its own line here (in addition to `/ws/*`) — anything not explicitly matched falls through to the frontend on `localhost:3000` and 404s, since Next.js has no route for it. If you add a new backend route in `server/src/app.ts`, add a matching `reverse_proxy` line here too.
 
 ```bash
 sudo systemctl reload caddy

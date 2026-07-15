@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useViewerSocket } from '@/lib/useViewerSocket';
 import { exportTranscriptPdf } from '@/lib/exportTranscriptPdf';
 import { TARGET_LANGUAGES } from '@/lib/languages';
-import { getFeedbackStrings } from '@/lib/feedbackStrings';
+import { getFeedbackStrings, EN_FALLBACK } from '@/lib/feedbackStrings';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001';
 const API_URL = WS_URL.replace(/^ws/, 'http');
@@ -204,7 +204,15 @@ function ViewerPageContent() {
         </div>
       </div>
       {exportError && <p className="px-3 pt-2 text-sm text-destructive">{exportError}</p>}
-      <div ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="px-6 sm:px-10 pt-3 pb-2 text-xs text-muted-foreground border-b bg-muted/30 space-y-1">
+        <p>{EN_FALLBACK.disclaimer}</p>
+        {strings !== EN_FALLBACK && <p>{strings.disclaimer}</p>}
+      </div>
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto px-6 sm:px-10 pt-4 pb-12 space-y-4"
+      >
         {lines.map((line, index) =>
           line.removed ? (
             <div key={line.id} className="flex items-center gap-2 text-xs text-muted-foreground">

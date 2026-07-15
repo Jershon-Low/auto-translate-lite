@@ -50,6 +50,7 @@ export default function CapturePage() {
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const [isFollowing, setIsFollowing] = useState(true);
 
   useEffect(() => {
     fetch(`${API_URL}/feedback`)
@@ -74,8 +75,21 @@ export default function CapturePage() {
 
   useEffect(() => {
     const container = transcriptRef.current;
+    if (container && isFollowing) container.scrollTop = container.scrollHeight;
+  }, [transcriptLines, isFollowing]);
+
+  function onTranscriptScroll() {
+    const container = transcriptRef.current;
+    if (!container) return;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    setIsFollowing(distanceFromBottom < 24);
+  }
+
+  function jumpToLatest() {
+    const container = transcriptRef.current;
     if (container) container.scrollTop = container.scrollHeight;
-  }, [transcriptLines]);
+    setIsFollowing(true);
+  }
 
   async function uploadSermonDoc(file: File) {
     setIsUploading(true);
@@ -252,6 +266,7 @@ export default function CapturePage() {
     setErrorMessage(null);
     setSessionCostUsd(0);
     setTranscriptLines([]);
+    setIsFollowing(true);
     connectSocket();
   }
 
@@ -338,7 +353,20 @@ export default function CapturePage() {
         Session: ${sessionCostUsd.toFixed(4)} · Lifetime: ${lifetimeCostUsd.toFixed(2)}
       </p>
       {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
-      <div ref={transcriptRef} className="w-full max-w-xl h-64 overflow-y-auto border rounded p-3 text-sm space-y-2">
+      <div className="relative w-full max-w-xl">
+        {!isFollowing && (
+          <button
+            onClick={jumpToLatest}
+            className="absolute bottom-2 right-2 z-10 bg-primary text-primary-foreground px-3 py-1 rounded text-xs shadow"
+          >
+            Jump to latest
+          </button>
+        )}
+        <div
+          ref={transcriptRef}
+          onScroll={onTranscriptScroll}
+          className="w-full h-64 overflow-y-auto border rounded p-3 text-sm space-y-2"
+        >
         {transcriptLines.map((line) => (
           <div key={line.id}>
             <p className={line.flagged ? 'text-destructive line-through' : undefined}>{line.text}</p>
@@ -381,6 +409,7 @@ export default function CapturePage() {
             )}
           </div>
         ))}
+        </div>
       </div>
 
       <div className="w-full max-w-xl flex flex-col gap-2">
