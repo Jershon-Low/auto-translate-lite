@@ -15,6 +15,8 @@ type TranscriptLine = {
   reinstateState?: 'editing' | 'pending' | 'error';
   editedText?: string;
   reinstateError?: string;
+  removeState?: 'pending' | 'error';
+  removeError?: string;
 };
 
 interface ViewerFeedbackItem {
@@ -240,6 +242,12 @@ export default function CapturePage() {
             line.id === message.id ? { ...line, reinstateState: 'error', reinstateError: message.error } : line
           )
         );
+      } else if (message.type === 'admin-remove-error') {
+        setTranscriptLines((previous) =>
+          previous.map((line) =>
+            line.id === message.id ? { ...line, removeState: 'error', removeError: message.error } : line
+          )
+        );
       } else if (message.type === 'cost') {
         setSessionCostUsd(message.sessionUsd);
         setLifetimeCostUsd(message.lifetimeUsd);
@@ -314,6 +322,16 @@ export default function CapturePage() {
     socketRef.current?.send(JSON.stringify({ type: 'reinstate', id, english: editedText }));
   }
 
+  function sendAdminRemove(id: string) {
+    if (status !== 'recording') return;
+    const confirmed = window.confirm('Remove this line? It can be reinstated afterward.');
+    if (!confirmed) return;
+    setTranscriptLines((previous) =>
+      previous.map((entry) => (entry.id === id ? { ...entry, removeState: 'pending' } : entry))
+    );
+    socketRef.current?.send(JSON.stringify({ type: 'admin-remove', id }));
+  }
+
   return (
     <main className="min-h-screen flex flex-col items-center gap-6 p-6">
       <h1 className="text-xl font-semibold">Sermon Capture</h1>
@@ -368,8 +386,19 @@ export default function CapturePage() {
           className="w-full h-64 overflow-y-auto border rounded p-3 text-sm space-y-2"
         >
         {transcriptLines.map((line) => (
-          <div key={line.id}>
-            <p className={line.flagged ? 'text-destructive line-through' : undefined}>{line.text}</p>
+          <div key={line.id} className="group">
+            <div className="flex items-start justify-between gap-2">
+              <p className={line.flagged ? 'text-destructive line-through' : undefined}>{line.text}</p>
+              {!line.flagged && (
+                <button
+                  onClick={() => sendAdminRemove(line.id)}
+                  disabled={status !== 'recording' || line.removeState === 'pending'}
+                  className="opacity-0 group-hover:opacity-100 text-xs underline text-destructive shrink-0 disabled:opacity-50"
+                >
+                  {line.removeState === 'pending' ? 'Removing…' : 'Remove'}
+                </button>
+              )}
+            </div>
             {line.flagged && line.reinstateState !== 'editing' && (
               <div className="flex items-center gap-2 text-xs">
                 {line.reason && <span className="text-muted-foreground">Flagged: {line.reason}</span>}
@@ -406,6 +435,9 @@ export default function CapturePage() {
             )}
             {line.reinstateState === 'error' && (
               <p className="text-xs text-destructive">Couldn&apos;t reinstate ({line.reinstateError}) — try again.</p>
+            )}
+            {line.removeState === 'error' && (
+              <p className="text-xs text-destructive">Couldn&apos;t remove ({line.removeError}) — try again.</p>
             )}
           </div>
         ))}

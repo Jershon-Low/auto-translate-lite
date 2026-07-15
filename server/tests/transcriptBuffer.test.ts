@@ -74,6 +74,57 @@ describe('TranscriptBuffer', () => {
     });
   });
 
+  describe('suppress', () => {
+    it('flips suppressed to true, preserving id, position, and text', () => {
+      const buffer = new TranscriptBuffer();
+      buffer.append('Before', 1000);
+      const visible = buffer.append('Visible line', 2000);
+      buffer.append('After', 3000);
+
+      const result = buffer.suppress(visible.id, 4000);
+
+      expect(result).not.toBeNull();
+      expect(result!.id).toBe(visible.id);
+      expect(result!.english).toBe('Visible line');
+      expect(result!.suppressed).toBe(true);
+
+      const recent = buffer.getRecent(4000);
+      expect(recent.map((line) => line.english)).toEqual(['Before', 'Visible line', 'After']);
+      expect(recent.find((line) => line.id === visible.id)?.suppressed).toBe(true);
+    });
+
+    it('returns null for an unknown id', () => {
+      const buffer = new TranscriptBuffer();
+      expect(buffer.suppress('does-not-exist', 1000)).toBeNull();
+    });
+
+    it('returns null for a line that is already suppressed', () => {
+      const buffer = new TranscriptBuffer();
+      const line = buffer.append('Already hidden', 1000, true);
+      expect(buffer.suppress(line.id, 2000)).toBeNull();
+    });
+
+    it('returns null once the line has been trimmed out of the 10-minute window', () => {
+      const buffer = new TranscriptBuffer();
+      const visible = buffer.append('Old and visible', 0);
+      const elevenMinutesLater = 11 * 60 * 1000;
+      expect(buffer.suppress(visible.id, elevenMinutesLater)).toBeNull();
+    });
+
+    it('round-trips with reinstate', () => {
+      const buffer = new TranscriptBuffer();
+      const line = buffer.append('Round trip', 1000);
+
+      buffer.suppress(line.id, 2000);
+      expect(buffer.getRecent(2000)[0].suppressed).toBe(true);
+
+      const result = buffer.reinstate(line.id, 'Round trip corrected', 3000);
+      expect(result).not.toBeNull();
+      expect(result!.suppressed).toBe(false);
+      expect(result!.english).toBe('Round trip corrected');
+    });
+  });
+
   describe('precedingContextFor', () => {
     it('returns the non-suppressed lines before the given id, oldest first', () => {
       const buffer = new TranscriptBuffer();

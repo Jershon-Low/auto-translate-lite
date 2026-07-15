@@ -27,6 +27,14 @@ export class TranscriptBuffer {
     return line;
   }
 
+  suppress(id: string, nowMs: number = Date.now()): CaptionLine | null {
+    this.trim(nowMs);
+    const line = this.lines.find((candidate) => candidate.id === id && !candidate.suppressed);
+    if (!line) return null;
+    line.suppressed = true;
+    return line;
+  }
+
   precedingContextFor(id: string, maxLines: number, nowMs: number = Date.now()): string[] {
     this.trim(nowMs);
     const index = this.lines.findIndex((line) => line.id === id);
