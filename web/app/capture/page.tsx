@@ -7,6 +7,16 @@ const API_URL = WS_URL.replace(/^ws/, 'http');
 
 type CaptureStatus = 'idle' | 'recording' | 'reconnecting' | 'error';
 
+type TranscriptLine = {
+  id: string;
+  text: string;
+  flagged: boolean;
+  reason?: string;
+  reinstateState?: 'editing' | 'pending' | 'error';
+  editedText?: string;
+  reinstateError?: string;
+};
+
 interface ViewerFeedbackItem {
   id: string;
   sessionId: string;
@@ -21,7 +31,7 @@ interface ViewerFeedbackItem {
 
 export default function CapturePage() {
   const [status, setStatus] = useState<CaptureStatus>('idle');
-  const [transcriptLines, setTranscriptLines] = useState<{ text: string; flagged: boolean }[]>([]);
+  const [transcriptLines, setTranscriptLines] = useState<TranscriptLine[]>([]);
   const [sessionCostUsd, setSessionCostUsd] = useState(0);
   const [lifetimeCostUsd, setLifetimeCostUsd] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -197,10 +207,25 @@ export default function CapturePage() {
       if (message.type === 'status') {
         setStatus(message.status);
       } else if (message.type === 'transcript') {
-        setTranscriptLines((previous) => [
-          ...previous.slice(-49),
-          { text: message.english, flagged: Boolean(message.flagged) },
-        ]);
+        setTranscriptLines((previous) => {
+          const index = previous.findIndex((line) => line.id === message.id);
+          const updated: TranscriptLine = {
+            id: message.id,
+            text: message.english,
+            flagged: Boolean(message.flagged),
+            reason: message.reason,
+          };
+          if (index === -1) return [...previous.slice(-49), updated];
+          const next = [...previous];
+          next[index] = updated;
+          return next;
+        });
+      } else if (message.type === 'reinstate-error') {
+        setTranscriptLines((previous) =>
+          previous.map((line) =>
+            line.id === message.id ? { ...line, reinstateState: 'error', reinstateError: message.error } : line
+          )
+        );
       } else if (message.type === 'cost') {
         setSessionCostUsd(message.sessionUsd);
         setLifetimeCostUsd(message.lifetimeUsd);
@@ -226,6 +251,7 @@ export default function CapturePage() {
     manuallyStoppedRef.current = false;
     setErrorMessage(null);
     setSessionCostUsd(0);
+    setTranscriptLines([]);
     connectSocket();
   }
 
@@ -239,6 +265,37 @@ export default function CapturePage() {
     socketRef.current?.close();
     setHasUploadedDoc(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function beginEditing(id: string, currentText: string) {
+    setTranscriptLines((previous) =>
+      previous.map((line) =>
+        line.id === id ? { ...line, reinstateState: 'editing', editedText: currentText, reinstateError: undefined } : line
+      )
+    );
+  }
+
+  function cancelEditing(id: string) {
+    setTranscriptLines((previous) =>
+      previous.map((line) => (line.id === id ? { ...line, reinstateState: undefined, editedText: undefined } : line))
+    );
+  }
+
+  function updateEditedText(id: string, text: string) {
+    setTranscriptLines((previous) => previous.map((line) => (line.id === id ? { ...line, editedText: text } : line)));
+  }
+
+  function sendReinstate(id: string) {
+    const line = transcriptLines.find((entry) => entry.id === id);
+    if (!line) return;
+    const editedText = (line.editedText ?? line.text).trim();
+    if (editedText.length === 0) return;
+    const confirmed = window.confirm(`Flagged: "${line.reason ?? 'no reason given'}". Send this line to viewers?`);
+    if (!confirmed) return;
+    setTranscriptLines((previous) =>
+      previous.map((entry) => (entry.id === id ? { ...entry, reinstateState: 'pending' } : entry))
+    );
+    socketRef.current?.send(JSON.stringify({ type: 'reinstate', id, english: editedText }));
   }
 
   return (
@@ -280,11 +337,48 @@ export default function CapturePage() {
         Session: ${sessionCostUsd.toFixed(4)} · Lifetime: ${lifetimeCostUsd.toFixed(2)}
       </p>
       {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
-      <div ref={transcriptRef} className="w-full max-w-xl h-64 overflow-y-auto border rounded p-3 text-sm space-y-1">
-        {transcriptLines.map((line, index) => (
-          <p key={index} className={line.flagged ? 'text-destructive line-through' : undefined}>
-            {line.text}
-          </p>
+      <div ref={transcriptRef} className="w-full max-w-xl h-64 overflow-y-auto border rounded p-3 text-sm space-y-2">
+        {transcriptLines.map((line) => (
+          <div key={line.id}>
+            <p className={line.flagged ? 'text-destructive line-through' : undefined}>{line.text}</p>
+            {line.flagged && line.reinstateState !== 'editing' && (
+              <div className="flex items-center gap-2 text-xs">
+                {line.reason && <span className="text-muted-foreground">Flagged: {line.reason}</span>}
+                <button
+                  onClick={() => beginEditing(line.id, line.text)}
+                  disabled={status !== 'recording' || line.reinstateState === 'pending'}
+                  className="underline disabled:opacity-50 disabled:no-underline"
+                >
+                  {line.reinstateState === 'pending' ? 'Reinstating…' : 'Reinstate'}
+                </button>
+              </div>
+            )}
+            {line.flagged && line.reinstateState === 'editing' && (
+              <div className="flex flex-col gap-1 mt-1">
+                <textarea
+                  value={line.editedText ?? line.text}
+                  onChange={(event) => updateEditedText(line.id, event.target.value)}
+                  rows={2}
+                  className="w-full border rounded p-1 text-xs"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => sendReinstate(line.id)}
+                    disabled={(line.editedText ?? line.text).trim().length === 0}
+                    className="bg-primary text-primary-foreground px-2 py-1 rounded text-xs disabled:opacity-50"
+                  >
+                    Send
+                  </button>
+                  <button onClick={() => cancelEditing(line.id)} className="text-xs underline">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {line.reinstateState === 'error' && (
+              <p className="text-xs text-destructive">Couldn&apos;t reinstate ({line.reinstateError}) — try again.</p>
+            )}
+          </div>
         ))}
       </div>
 
