@@ -41,7 +41,14 @@ export function useViewerSocket(language: string, wsUrl: string) {
           ]);
           setStatus('live');
         } else if (message.type === 'line-removed') {
-          setLines((previous) => [...previous, { id: message.id, english: '', translated: '', removed: true }]);
+          setLines((previous) => {
+            const index = previous.findIndex((line) => line.id === message.id);
+            const placeholder = { id: message.id, english: '', translated: '', removed: true };
+            if (index === -1) return [...previous, placeholder];
+            const next = [...previous];
+            next[index] = placeholder;
+            return next;
+          });
           setStatus('live');
         } else if (message.type === 'caption-inserted') {
           setLines((previous) => {
