@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 export interface CaptionLine {
+  id: string;
   english: string;
   translated: string;
   removed?: boolean;
@@ -36,11 +37,21 @@ export function useViewerSocket(language: string, wsUrl: string) {
         } else if (message.type === 'caption') {
           setLines((previous) => [
             ...previous,
-            { english: message.english, translated: message.translated },
+            { id: message.id, english: message.english, translated: message.translated },
           ]);
           setStatus('live');
         } else if (message.type === 'line-removed') {
-          setLines((previous) => [...previous, { english: '', translated: '', removed: true }]);
+          setLines((previous) => [...previous, { id: message.id, english: '', translated: '', removed: true }]);
+          setStatus('live');
+        } else if (message.type === 'caption-inserted') {
+          setLines((previous) => {
+            const index = previous.findIndex((line) => line.id === message.id);
+            const inserted = { id: message.id, english: message.english, translated: message.translated };
+            if (index === -1) return [...previous, inserted];
+            const next = [...previous];
+            next[index] = inserted;
+            return next;
+          });
           setStatus('live');
         }
       };
