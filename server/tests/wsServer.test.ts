@@ -968,6 +968,122 @@ describe('wsServer', () => {
     });
   });
 
+  describe('admin-remove', () => {
+    it('suppresses a live line, acks the capture socket with a "Removed by admin" reason, and broadcasts line-removed to viewers', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await captionPromise;
+      const transcript = await transcriptPromise;
+
+      const line = session.buffer.getRecent()[0];
+
+      const ackPromise = waitForMessage(captureSocket);
+      const removedPromise = waitForMessage(viewerSocket);
+      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: line.id }));
+
+      const ack = await ackPromise;
+      expect(ack).toEqual({
+        type: 'transcript',
+        id: line.id,
+        english: 'Hello everyone',
+        flagged: true,
+        reason: 'Removed by admin',
+      });
+
+      const removed = await removedPromise;
+      expect(removed).toEqual({ type: 'line-removed', id: line.id });
+
+      expect(session.buffer.getRecent().find((entry) => entry.id === line.id)?.suppressed).toBe(true);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('responds with admin-remove-error for an unknown id and does not touch the buffer', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const errorPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: 'no-such-id' }));
+      const error = await errorPromise;
+
+      expect(error).toEqual({ type: 'admin-remove-error', id: 'no-such-id', error: 'not found' });
+      expect(session.buffer.getRecent()).toHaveLength(0);
+
+      captureSocket.close();
+    });
+
+    it('responds with admin-remove-error for a line that is already suppressed', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const flagged = session.buffer.append('Already hidden', Date.now(), true);
+
+      const errorPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: flagged.id }));
+      const error = await errorPromise;
+
+      expect(error).toEqual({ type: 'admin-remove-error', id: flagged.id, error: 'not found' });
+
+      captureSocket.close();
+    });
+
+    it('an admin-removed line can subsequently be reinstated with corrected text', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const transcript = await transcriptPromise;
+
+      const removeAckPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: transcript.id }));
+      await removeAckPromise;
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: [{ ...removed placeholder }]
+
+      const reinstateAckPromise = waitForMessage(captureSocket);
+      const insertedPromise = waitForMessage(viewerSocket);
+      captureSocket.send(
+        JSON.stringify({ type: 'reinstate', id: transcript.id, english: 'Hello everyone, corrected' })
+      );
+
+      const reinstateAck = await reinstateAckPromise;
+      expect(reinstateAck).toEqual({ type: 'transcript', id: transcript.id, english: 'Hello everyone, corrected' });
+
+      const inserted = await insertedPromise;
+      expect(inserted).toEqual({
+        type: 'caption-inserted',
+        id: transcript.id,
+        english: 'Hello everyone, corrected',
+        translated: '你好',
+      });
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+  });
+
   describe('segment processing order', () => {
     it('processes segments strictly in arrival order even if a later segment finishes its Gemini calls first', async () => {
       let resolveFirst!: (value: { text: string }) => void;

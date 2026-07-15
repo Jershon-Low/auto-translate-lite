@@ -125,6 +125,16 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                   error: error instanceof Error ? error.message : String(error),
                 });
               });
+          } else if (message.type === 'admin-remove') {
+            processingQueue = processingQueue
+              .then(() => handleAdminRemove(message.id, deps, ws))
+              .catch((error) => {
+                void logEvent('error', {
+                  event: 'admin_remove_processing_failed',
+                  id: message.id,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              });
           }
         } else if (deepgramConnection) {
           deepgramConnection.send(data as Buffer);
@@ -227,6 +237,22 @@ async function handleReinstate(
   );
 
   await finishPublishing(line, translations, deps, captureSocket, 'caption-inserted');
+}
+
+async function handleAdminRemove(id: string, deps: WsServerDeps, captureSocket: WebSocket): Promise<void> {
+  const line = deps.session.buffer.suppress(id);
+  if (line === null) {
+    captureSocket.send(JSON.stringify({ type: 'admin-remove-error', id, error: 'not found' }));
+    return;
+  }
+
+  captureSocket.send(
+    JSON.stringify({ type: 'transcript', id: line.id, english: line.english, flagged: true, reason: 'Removed by admin' })
+  );
+  const removedPayload = JSON.stringify({ type: 'line-removed', id: line.id });
+  for (const viewerSocket of deps.session.getAllViewers()) {
+    viewerSocket.send(removedPayload);
+  }
 }
 
 async function handleFinalSegment(
