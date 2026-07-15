@@ -7,6 +7,18 @@ const API_URL = WS_URL.replace(/^ws/, 'http');
 
 type CaptureStatus = 'idle' | 'recording' | 'reconnecting' | 'error';
 
+interface ViewerFeedbackItem {
+  id: string;
+  sessionId: string;
+  timestamp: string;
+  language: string;
+  lineIndex: number;
+  english: string;
+  translated: string;
+  comment: string;
+  downloaded: boolean;
+}
+
 export default function CapturePage() {
   const [status, setStatus] = useState<CaptureStatus>('idle');
   const [transcriptLines, setTranscriptLines] = useState<{ text: string; flagged: boolean }[]>([]);
@@ -19,6 +31,8 @@ export default function CapturePage() {
   const [feedbackText, setFeedbackText] = useState('');
   const [feedbackSaveStatus, setFeedbackSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [viewerFeedback, setViewerFeedback] = useState<ViewerFeedbackItem[]>([]);
+  const [feedbackDownloadError, setFeedbackDownloadError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -33,6 +47,20 @@ export default function CapturePage() {
       .then((data) => setFeedbackText(data.text ?? ''))
       .catch(() => setFeedbackText(''));
   }, []);
+
+  useEffect(() => {
+    void fetchViewerFeedback();
+  }, []);
+
+  async function fetchViewerFeedback() {
+    try {
+      const response = await fetch(`${API_URL}/viewer-feedback`);
+      const data = await response.json();
+      setViewerFeedback(Array.isArray(data.items) ? data.items : []);
+    } catch {
+      setViewerFeedback([]);
+    }
+  }
 
   useEffect(() => {
     const container = transcriptRef.current;
@@ -95,6 +123,40 @@ export default function CapturePage() {
       setFeedbackError('Save failed. Check your connection and try again.');
       setFeedbackSaveStatus('idle');
     }
+  }
+
+  async function downloadFeedbackCsv(url: string) {
+    setFeedbackDownloadError(null);
+    try {
+      const response = await fetch(url, { method: 'POST' });
+      if (!response.ok) {
+        setFeedbackDownloadError(`Download failed (status ${response.status}). Check your connection and try again.`);
+        return;
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') ?? '';
+      const match = disposition.match(/filename="([^"]+)"/);
+      const filename = match ? match[1] : 'feedback.csv';
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(objectUrl);
+      await fetchViewerFeedback();
+    } catch {
+      setFeedbackDownloadError('Download failed. Check your connection and try again.');
+    }
+  }
+
+  function downloadFeedbackItem(id: string) {
+    void downloadFeedbackCsv(`${API_URL}/viewer-feedback/${id}/download`);
+  }
+
+  function downloadAllUndownloadedFeedback() {
+    void downloadFeedbackCsv(`${API_URL}/viewer-feedback/download-all`);
   }
 
   async function ensureRecorderStreaming(socket: WebSocket) {
@@ -249,6 +311,42 @@ export default function CapturePage() {
           {feedbackSaveStatus === 'saved' && <p className="text-sm text-green-600">Saved.</p>}
         </div>
         {feedbackError && <p className="text-sm text-destructive">{feedbackError}</p>}
+      </div>
+
+      <div className="w-full max-w-xl flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <label className="text-sm font-medium">Viewer feedback</label>
+          <button
+            onClick={downloadAllUndownloadedFeedback}
+            disabled={viewerFeedback.every((item) => item.downloaded)}
+            className="bg-secondary text-secondary-foreground px-3 py-1 rounded text-sm disabled:opacity-50"
+          >
+            Download all undownloaded ({viewerFeedback.filter((item) => !item.downloaded).length} new)
+          </button>
+        </div>
+        {feedbackDownloadError && <p className="text-sm text-destructive">{feedbackDownloadError}</p>}
+        {viewerFeedback.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No feedback yet.</p>
+        ) : (
+          <div className="border rounded divide-y max-h-80 overflow-y-auto text-sm">
+            {viewerFeedback.map((item) => (
+              <div key={item.id} className="p-2 flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    {new Date(item.timestamp).toLocaleString()} · {item.language}
+                    {item.downloaded ? ' · downloaded' : ' · new'}
+                  </span>
+                  <button onClick={() => downloadFeedbackItem(item.id)} className="text-xs underline">
+                    Download
+                  </button>
+                </div>
+                <p className="text-muted-foreground">{item.english}</p>
+                <p>{item.translated}</p>
+                {item.comment && <p className="italic">&quot;{item.comment}&quot;</p>}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </main>
   );
