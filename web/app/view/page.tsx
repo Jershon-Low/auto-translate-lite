@@ -204,14 +204,10 @@ function ViewerPageContent() {
         </div>
       </div>
       {exportError && <p className="px-3 pt-2 text-sm text-destructive">{exportError}</p>}
-      <div className="px-6 sm:px-10 pt-3 pb-2 text-xs text-muted-foreground border-b bg-muted/30 space-y-1">
-        <p>{EN_FALLBACK.disclaimer}</p>
-        {strings !== EN_FALLBACK && <p>{strings.disclaimer}</p>}
-      </div>
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-6 sm:px-10 pt-4 pb-12 space-y-4"
+        className="flex-1 overflow-y-auto px-6 sm:px-10 pt-4 pb-16 space-y-4"
       >
         {lines.map((line, index) =>
           line.removed ? (
@@ -240,6 +236,10 @@ function ViewerPageContent() {
           Jump to latest ↓
         </button>
       )}
+      <div className="px-6 sm:px-10 pt-3 pb-2 text-xs text-muted-foreground border-b bg-muted/30 space-y-1">
+        <p>{EN_FALLBACK.disclaimer}</p>
+        {strings !== EN_FALLBACK && <p className="py-2">{strings.disclaimer}</p>}
+      </div>  
     </main>
   );
 }
