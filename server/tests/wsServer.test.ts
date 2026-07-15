@@ -790,6 +790,184 @@ describe('wsServer', () => {
     });
   });
 
+  describe('reinstate', () => {
+    async function flagALine(
+      captureSocket: WebSocket,
+      geminiClient: GeminiClient,
+      reason = 'likely mis-heard negation'
+    ): Promise<{ id: string; english: string }> {
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: `{"safe":false,"reason":"${reason}"}` });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
+      const transcript = await transcriptPromise;
+      return { id: transcript.id, english: transcript.english };
+    }
+
+    it('reinstates with unedited text: un-flags the capture line and broadcasts caption-inserted', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const flagged = await flagALine(captureSocket, geminiClient);
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: '{"zh":{"safe":true,"reason":"ok"}}' });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const ackPromise = waitForMessage(captureSocket);
+      const insertedPromise = waitForMessage(viewerSocket);
+      captureSocket.send(JSON.stringify({ type: 'reinstate', id: flagged.id, english: flagged.english }));
+
+      const ack = await ackPromise;
+      expect(ack).toEqual({ type: 'transcript', id: flagged.id, english: flagged.english });
+
+      const inserted = await insertedPromise;
+      expect(inserted).toEqual({ type: 'caption-inserted', id: flagged.id, english: flagged.english, translated: '你好' });
+
+      const recent = session.buffer.getRecent();
+      expect(recent.find((line) => line.id === flagged.id)?.suppressed).toBe(false);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('reinstates with edited text: stores the corrected wording, reflected in a later backlog', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const flagged = await flagALine(captureSocket, geminiClient);
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: '{}' });
+        }
+        return Promise.resolve({ text: '{"zh":"耶稣确实是神的儿子"}' });
+      });
+
+      const ackPromise = waitForMessage(captureSocket);
+      captureSocket.send(
+        JSON.stringify({ type: 'reinstate', id: flagged.id, english: 'Jesus is indeed the son of God' })
+      );
+      const ack = await ackPromise;
+      expect(ack).toEqual({ type: 'transcript', id: flagged.id, english: 'Jesus is indeed the son of God' });
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      const backlogMessage = await waitForMessage(viewerSocket);
+
+      expect(backlogMessage).toEqual({
+        type: 'backlog',
+        lines: [{ id: flagged.id, english: 'Jesus is indeed the son of God', translated: 'Jesus is indeed the son of God' }],
+      });
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('responds with reinstate-error for an unknown id and does not touch the buffer', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const errorPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'reinstate', id: 'no-such-id', english: 'text' }));
+      const error = await errorPromise;
+
+      expect(error).toEqual({ type: 'reinstate-error', id: 'no-such-id', error: 'not found' });
+      expect(session.buffer.getRecent()).toHaveLength(0);
+
+      captureSocket.close();
+    });
+
+    it('responds with reinstate-error for a line that is not currently suppressed', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const visible = session.buffer.append('Already visible', Date.now());
+
+      const errorPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'reinstate', id: visible.id, english: 'text' }));
+      const error = await errorPromise;
+
+      expect(error).toEqual({ type: 'reinstate-error', id: visible.id, error: 'not found' });
+
+      captureSocket.close();
+    });
+
+    it('responds with reinstate-error for blank edited text and does not touch the buffer', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const flagged = await flagALine(captureSocket, geminiClient);
+
+      const errorPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'reinstate', id: flagged.id, english: '   ' }));
+      const error = await errorPromise;
+
+      expect(error).toEqual({ type: 'reinstate-error', id: flagged.id, error: 'empty text' });
+      expect(session.buffer.getRecent().find((line) => line.id === flagged.id)?.suppressed).toBe(true);
+
+      captureSocket.close();
+    });
+
+    it('uses the line\'s fixed position for translation context, not lines that arrived after it', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      // A subscribed viewer is required so translateWithFallback actually
+      // calls Gemini during reinstate (activeLanguages.length > 0) — with no
+      // viewers it would short-circuit to {} without any translate call.
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      session.buffer.append('Earlier context line', Date.now());
+      const flagged = await flagALine(captureSocket, geminiClient);
+      session.buffer.append('Later unrelated line', Date.now());
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('safety checker')) return Promise.resolve({ text: '{}' });
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const ackPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'reinstate', id: flagged.id, english: flagged.english }));
+      await ackPromise;
+
+      const translateCall = (geminiClient.models.generateContent as any).mock.calls.find(isTranslateCall);
+      expect(translateCall[0].contents).toContain('Earlier context line');
+      expect(translateCall[0].contents).not.toContain('Later unrelated line');
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+  });
+
   describe('segment processing order', () => {
     it('processes segments strictly in arrival order even if a later segment finishes its Gemini calls first', async () => {
       let resolveFirst!: (value: { text: string }) => void;

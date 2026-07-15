@@ -115,6 +115,16 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             finalizeDeepgramCost();
             unsubscribeCost?.();
             unsubscribeCost = null;
+          } else if (message.type === 'reinstate') {
+            processingQueue = processingQueue
+              .then(() => handleReinstate(message.id, message.english, deps, ws))
+              .catch((error) => {
+                void logEvent('error', {
+                  event: 'reinstate_processing_failed',
+                  id: message.id,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              });
           }
         } else if (deepgramConnection) {
           deepgramConnection.send(data as Buffer);
@@ -156,7 +166,8 @@ async function finishPublishing(
   line: CaptionLine,
   translations: Record<string, string>,
   deps: WsServerDeps,
-  captureSocket: WebSocket
+  captureSocket: WebSocket,
+  viewerMessageType: 'caption' | 'caption-inserted' = 'caption'
 ): Promise<void> {
   captureSocket.send(JSON.stringify({ type: 'transcript', id: line.id, english: line.english }));
 
@@ -180,11 +191,42 @@ async function finishPublishing(
       logTranslationFallback(language, line.english, translated, verification?.reason ?? 'verification unavailable');
     }
 
-    const payload = JSON.stringify({ type: 'caption', id: line.id, english: line.english, translated: outgoing });
+    const payload = JSON.stringify({ type: viewerMessageType, id: line.id, english: line.english, translated: outgoing });
     for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
       viewerSocket.send(payload);
     }
   }
+}
+
+async function handleReinstate(
+  id: string,
+  english: string,
+  deps: WsServerDeps,
+  captureSocket: WebSocket
+): Promise<void> {
+  const trimmed = english.trim();
+  if (trimmed.length === 0) {
+    captureSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'empty text' }));
+    return;
+  }
+
+  const line = deps.session.buffer.reinstate(id, trimmed);
+  if (line === null) {
+    captureSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'not found' }));
+    return;
+  }
+
+  const precedingContext = deps.session.buffer.precedingContextFor(line.id, PRECEDING_CONTEXT_LINES);
+  const activeLanguages = deps.session.getActiveLanguages();
+  const translations = await translateWithFallback(
+    deps,
+    line.english,
+    activeLanguages,
+    precedingContext,
+    deps.session.sermonCache
+  );
+
+  await finishPublishing(line, translations, deps, captureSocket, 'caption-inserted');
 }
 
 async function handleFinalSegment(
