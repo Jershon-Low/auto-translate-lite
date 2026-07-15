@@ -1091,7 +1091,9 @@ export function useViewerSocket(language: string, wsUrl: string) {
 
 - [ ] **Step 2: Update the list key in `web/app/view/page.tsx`**
 
-Current (lines 90-103):
+Note: a concurrent, unrelated change (viewer per-line feedback flagging) landed on this file since this plan was written — it now wraps each line in a flex row with a `renderLineFeedback(index, line)` flag button. Only the two `key` attributes change here; everything else (including `renderLineFeedback` and the `index` map parameter, which that unrelated feature still needs) stays as-is.
+
+Current:
 
 ```tsx
         {lines.map((line, index) =>
@@ -1102,18 +1104,21 @@ Current (lines 90-103):
               <span className="flex-1 border-t border-dashed" />
             </div>
           ) : (
-            <div key={index}>
-              <p className="text-sm text-muted-foreground">{line.english}</p>
-              <p className="text-xl">{line.translated}</p>
+            <div key={index} className="flex items-start gap-2">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-muted-foreground">{line.english}</p>
+                <p className="text-xl">{line.translated}</p>
+              </div>
+              {renderLineFeedback(index, line)}
             </div>
           )
         )}
 ```
 
-Replace with (only the two `key` attributes change; the `index` map parameter is no longer needed):
+Replace with:
 
 ```tsx
-        {lines.map((line) =>
+        {lines.map((line, index) =>
           line.removed ? (
             <div key={line.id} className="flex items-center gap-2 text-xs text-muted-foreground">
               <span className="flex-1 border-t border-dashed" />
@@ -1121,9 +1126,12 @@ Replace with (only the two `key` attributes change; the `index` map parameter is
               <span className="flex-1 border-t border-dashed" />
             </div>
           ) : (
-            <div key={line.id}>
-              <p className="text-sm text-muted-foreground">{line.english}</p>
-              <p className="text-xl">{line.translated}</p>
+            <div key={line.id} className="flex items-start gap-2">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-muted-foreground">{line.english}</p>
+                <p className="text-xl">{line.translated}</p>
+              </div>
+              {renderLineFeedback(index, line)}
             </div>
           )
         )}
