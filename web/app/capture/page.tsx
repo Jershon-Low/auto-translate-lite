@@ -286,6 +286,7 @@ export default function CapturePage() {
   }
 
   function sendReinstate(id: string) {
+    if (status !== 'recording') return;
     const line = transcriptLines.find((entry) => entry.id === id);
     if (!line) return;
     const editedText = (line.editedText ?? line.text).trim();
@@ -353,7 +354,7 @@ export default function CapturePage() {
                 </button>
               </div>
             )}
-            {line.flagged && line.reinstateState === 'editing' && (
+            {line.flagged && line.reinstateState === 'editing' && status === 'recording' && (
               <div className="flex flex-col gap-1 mt-1">
                 <textarea
                   value={line.editedText ?? line.text}
