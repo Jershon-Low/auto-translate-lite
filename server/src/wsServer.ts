@@ -1,6 +1,7 @@
 import type { IncomingMessage, Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Session } from './session.js';
+import type { CaptionLine } from './types.js';
 import { translateSegment, translateBacklog, type GeminiClient, type SermonCacheRef } from './gemini.js';
 import { verifyTranslations, type VerificationItem, type VerificationResult } from './translationVerifier.js';
 import { verifyTranscription, type TranscriptionCheckResult } from './transcriptionVerifier.js';
@@ -151,13 +152,51 @@ function logTranslationFallback(
   void logEvent('warn', { event: 'translation_fallback', language, english, discardedTranslation, reason });
 }
 
+async function finishPublishing(
+  line: CaptionLine,
+  translations: Record<string, string>,
+  deps: WsServerDeps,
+  captureSocket: WebSocket
+): Promise<void> {
+  captureSocket.send(JSON.stringify({ type: 'transcript', id: line.id, english: line.english }));
+
+  const activeLanguages = deps.session.getActiveLanguages();
+  if (activeLanguages.length === 0) return;
+
+  const verificationItems: VerificationItem[] = activeLanguages
+    .filter((language) => Boolean(translations[language]))
+    .map((language) => ({ id: language, english: line.english, translated: translations[language] }));
+  const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems, deps.session.sermonCache);
+
+  for (const language of activeLanguages) {
+    const translated = translations[language];
+    if (!translated) continue;
+
+    const verification = verifications[language];
+    const safe = verification?.safe === true;
+    const outgoing = safe ? translated : line.english;
+
+    if (!safe) {
+      logTranslationFallback(language, line.english, translated, verification?.reason ?? 'verification unavailable');
+    }
+
+    const payload = JSON.stringify({ type: 'caption', id: line.id, english: line.english, translated: outgoing });
+    for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
+      viewerSocket.send(payload);
+    }
+  }
+}
+
 async function handleFinalSegment(
   english: string,
   deps: WsServerDeps,
   captureSocket: WebSocket
 ): Promise<void> {
   const recentLines = deps.session.buffer.getRecent();
-  const precedingContext = recentLines.slice(-PRECEDING_CONTEXT_LINES).map((recentLine) => recentLine.english);
+  const precedingContext = recentLines
+    .filter((recentLine) => !recentLine.suppressed)
+    .slice(-PRECEDING_CONTEXT_LINES)
+    .map((recentLine) => recentLine.english);
   const sermonCache = deps.session.sermonCache;
   const activeLanguages = deps.session.getActiveLanguages();
 
@@ -168,10 +207,11 @@ async function handleFinalSegment(
 
   if (!transcriptionResult.safe) {
     void logEvent('warn', { event: 'transcription_flagged', english, reason: transcriptionResult.reason });
+    const line = deps.session.buffer.append(english, Date.now(), true);
     captureSocket.send(
-      JSON.stringify({ type: 'transcript', english, flagged: true, reason: transcriptionResult.reason })
+      JSON.stringify({ type: 'transcript', id: line.id, english, flagged: true, reason: transcriptionResult.reason })
     );
-    const removedPayload = JSON.stringify({ type: 'line-removed' });
+    const removedPayload = JSON.stringify({ type: 'line-removed', id: line.id });
     for (const viewerSocket of deps.session.getAllViewers()) {
       viewerSocket.send(removedPayload);
     }
@@ -179,32 +219,7 @@ async function handleFinalSegment(
   }
 
   const line = deps.session.buffer.append(english);
-  captureSocket.send(JSON.stringify({ type: 'transcript', english }));
-
-  if (activeLanguages.length === 0) return;
-
-  const verificationItems: VerificationItem[] = activeLanguages
-    .filter((language) => Boolean(translations[language]))
-    .map((language) => ({ id: language, english, translated: translations[language] }));
-  const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems, sermonCache);
-
-  for (const language of activeLanguages) {
-    const translated = translations[language];
-    if (!translated) continue;
-
-    const verification = verifications[language];
-    const safe = verification?.safe === true;
-    const outgoing = safe ? translated : english;
-
-    if (!safe) {
-      logTranslationFallback(language, english, translated, verification?.reason ?? 'verification unavailable');
-    }
-
-    const payload = JSON.stringify({ type: 'caption', english: line.english, translated: outgoing });
-    for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
-      viewerSocket.send(payload);
-    }
-  }
+  await finishPublishing(line, translations, deps, captureSocket);
 }
 
 async function translateWithFallback(
@@ -290,40 +305,51 @@ function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
             return;
           }
 
+          const visibleEntries = backlog.filter((line) => !line.suppressed);
           const translations = await translateBacklog(
             deps.geminiClient,
-            backlog.map((line) => line.english),
+            visibleEntries.map((line) => line.english),
             language
           );
-          const lines = backlog.map((line, index) => ({
+          const visibleLines = visibleEntries.map((line, index) => ({
+            id: line.id,
             english: line.english,
             translated: translations[index] ?? '',
           }));
 
-          const verificationItems: VerificationItem[] = lines
-            .map((line, index) => ({ line, index }))
-            .filter(({ line }) => line.translated.length > 0)
-            .map(({ line, index }) => ({ id: String(index), english: line.english, translated: line.translated }));
+          const verificationItems: VerificationItem[] = visibleLines
+            .filter((line) => line.translated.length > 0)
+            .map((line) => ({ id: line.id, english: line.english, translated: line.translated }));
           const verifications = await verifyTranslationsWithRetry(
             deps.geminiClient,
             verificationItems,
             deps.session.sermonCache
           );
 
-          const verifiedLines = lines.map((line, index) => {
-            if (line.translated.length === 0) return { english: line.english, translated: line.english };
-            const verification = verifications[String(index)];
-            if (verification?.safe === true) return line;
-            logTranslationFallback(
-              language,
-              line.english,
-              line.translated,
-              verification?.reason ?? 'verification unavailable'
-            );
-            return { english: line.english, translated: line.english };
-          });
+          const verifiedById = new Map(
+            visibleLines.map((line) => {
+              if (line.translated.length === 0) {
+                return [line.id, { id: line.id, english: line.english, translated: line.english }] as const;
+              }
+              const verification = verifications[line.id];
+              if (verification?.safe === true) return [line.id, line] as const;
+              logTranslationFallback(
+                language,
+                line.english,
+                line.translated,
+                verification?.reason ?? 'verification unavailable'
+              );
+              return [line.id, { id: line.id, english: line.english, translated: line.english }] as const;
+            })
+          );
 
-          ws.send(JSON.stringify({ type: 'backlog', lines: verifiedLines }));
+          const lines = backlog.map((line) =>
+            line.suppressed
+              ? { id: line.id, english: '', translated: '', removed: true }
+              : verifiedById.get(line.id)!
+          );
+
+          ws.send(JSON.stringify({ type: 'backlog', lines }));
           deps.session.addViewer(ws, language);
         }
       } catch (error) {

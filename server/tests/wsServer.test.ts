@@ -148,7 +148,7 @@ describe('wsServer', () => {
     capturedCallbacks!.onFinalSegment('Hello everyone');
     const caption = await captionPromise;
 
-    expect(caption).toEqual({ type: 'caption', english: 'Hello everyone', translated: '你好' });
+    expect(caption).toEqual({ type: 'caption', id: expect.any(String), english: 'Hello everyone', translated: '你好' });
 
     captureSocket.close();
     viewerSocket.close();
@@ -210,7 +210,7 @@ describe('wsServer', () => {
 
     expect(backlogMessage).toEqual({
       type: 'backlog',
-      lines: [{ english: 'Earlier line', translated: '较早的一行' }],
+      lines: [{ id: expect.any(String), english: 'Earlier line', translated: '较早的一行' }],
     });
 
     captureSocket.close();
@@ -275,7 +275,7 @@ describe('wsServer', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(messages).toEqual([
-      { type: 'backlog', lines: [{ english: 'Earlier line', translated: '较早的一行' }] },
+      { type: 'backlog', lines: [{ id: expect.any(String), english: 'Earlier line', translated: '较早的一行' }] },
     ]);
 
     const captionPromise = waitForMessage(viewerSocket);
@@ -283,6 +283,7 @@ describe('wsServer', () => {
     const caption = await captionPromise;
     expect(caption).toEqual({
       type: 'caption',
+      id: expect.any(String),
       english: 'Now the viewer is registered',
       translated: '你好',
     });
@@ -317,7 +318,7 @@ describe('wsServer', () => {
     capturedCallbacks!.onFinalSegment('Jesus loves you');
     const caption = await captionPromise;
 
-    expect(caption).toEqual({ type: 'caption', english: 'Jesus loves you', translated: 'Jesus loves you' });
+    expect(caption).toEqual({ type: 'caption', id: expect.any(String), english: 'Jesus loves you', translated: 'Jesus loves you' });
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('translation_fallback'));
 
     warnSpy.mockRestore();
@@ -352,7 +353,7 @@ describe('wsServer', () => {
     capturedCallbacks!.onFinalSegment('Hello everyone');
     const caption = await captionPromise;
 
-    expect(caption).toEqual({ type: 'caption', english: 'Hello everyone', translated: 'Hello everyone' });
+    expect(caption).toEqual({ type: 'caption', id: expect.any(String), english: 'Hello everyone', translated: 'Hello everyone' });
     expect(verifyCallCount).toBe(2);
 
     captureSocket.close();
@@ -360,12 +361,6 @@ describe('wsServer', () => {
   });
 
   it('falls back to English in the backlog when the verifier flags a line as unsafe', async () => {
-    (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
-      if (params.contents.includes('safety checker')) {
-        return Promise.resolve({ text: '{"0":{"safe":false,"reason":"polarity flip"}}' });
-      }
-      return Promise.resolve({ text: '{"translations":["耶稣不爱你"]}' });
-    });
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
@@ -373,7 +368,14 @@ describe('wsServer', () => {
     captureSocket.send(JSON.stringify({ type: 'start' }));
     await waitForMessage(captureSocket); // status: recording
 
-    session.buffer.append('Jesus loves you', Date.now());
+    const line = session.buffer.append('Jesus loves you', Date.now());
+
+    (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+      if (params.contents.includes('safety checker')) {
+        return Promise.resolve({ text: JSON.stringify({ [line.id]: { safe: false, reason: 'polarity flip' } }) });
+      }
+      return Promise.resolve({ text: '{"translations":["耶稣不爱你"]}' });
+    });
 
     const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
     await waitForOpen(viewerSocket);
@@ -382,7 +384,7 @@ describe('wsServer', () => {
 
     expect(backlogMessage).toEqual({
       type: 'backlog',
-      lines: [{ english: 'Jesus loves you', translated: 'Jesus loves you' }],
+      lines: [{ id: line.id, english: 'Jesus loves you', translated: 'Jesus loves you' }],
     });
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('translation_fallback'));
 
@@ -415,7 +417,7 @@ describe('wsServer', () => {
 
     expect(backlogMessage).toEqual({
       type: 'backlog',
-      lines: [{ english: 'Earlier line', translated: 'Earlier line' }],
+      lines: [{ id: expect.any(String), english: 'Earlier line', translated: 'Earlier line' }],
     });
     expect(verifyCallCount).toBe(2);
 
@@ -552,7 +554,7 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('Cain killed Abel');
       const caption = await captionPromise;
 
-      expect(caption).toEqual({ type: 'caption', english: 'Cain killed Abel', translated: '你好' });
+      expect(caption).toEqual({ type: 'caption', id: expect.any(String), english: 'Cain killed Abel', translated: '你好' });
 
       const translateCalls = (geminiClient.models.generateContent as any).mock.calls.filter(isTranslateCall);
       expect(translateCalls).toHaveLength(2);
@@ -613,7 +615,7 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('Cain killed Abel');
       const caption = await captionPromise;
 
-      expect(caption).toEqual({ type: 'caption', english: 'Cain killed Abel', translated: '你好' });
+      expect(caption).toEqual({ type: 'caption', id: expect.any(String), english: 'Cain killed Abel', translated: '你好' });
       expect(verifyCallCount).toBe(2);
 
       const verifyCalls = (geminiClient.models.generateContent as any).mock.calls.filter((call: any) =>
@@ -660,6 +662,7 @@ describe('wsServer', () => {
 
       expect(transcript).toEqual({
         type: 'transcript',
+        id: expect.any(String),
         english: 'Jesus is not the son of God',
         flagged: true,
         reason: 'likely mis-heard negation',
@@ -667,15 +670,20 @@ describe('wsServer', () => {
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('transcription_flagged'));
 
       await new Promise((resolve) => setImmediate(resolve));
-      expect(viewerMessages).toEqual([{ type: 'line-removed' }]);
-      expect(session.buffer.getRecent()).toHaveLength(0);
+      expect(viewerMessages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+      expect(session.buffer.getRecent()).toHaveLength(1);
+      expect(session.buffer.getRecent()[0]).toMatchObject({
+        id: transcript.id,
+        english: 'Jesus is not the son of God',
+        suppressed: true,
+      });
 
       warnSpy.mockRestore();
       captureSocket.close();
       viewerSocket.close();
     });
 
-    it('runs the transcription check even with zero active viewers, keeping a flagged line out of the buffer', async () => {
+    it('runs the transcription check even with zero active viewers, storing a flagged line as suppressed', async () => {
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
         if (params.contents.includes('transcription accuracy checker')) {
           return Promise.resolve({ text: '{"safe":false,"reason":"likely mis-heard negation"}' });
@@ -692,7 +700,9 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
       await transcriptPromise;
 
-      expect(session.buffer.getRecent()).toHaveLength(0);
+      const recent = session.buffer.getRecent();
+      expect(recent).toHaveLength(1);
+      expect(recent[0].suppressed).toBe(true);
       expect((geminiClient.models.generateContent as any).mock.calls).toHaveLength(1);
 
       captureSocket.close();
@@ -708,7 +718,7 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('Hello everyone');
       const transcript = await transcriptPromise;
 
-      expect(transcript).toEqual({ type: 'transcript', english: 'Hello everyone' });
+      expect(transcript).toEqual({ type: 'transcript', id: expect.any(String), english: 'Hello everyone' });
 
       captureSocket.close();
     });
@@ -734,14 +744,49 @@ describe('wsServer', () => {
 
       expect(transcript).toEqual({
         type: 'transcript',
+        id: expect.any(String),
         english: 'Hello everyone',
         flagged: true,
         reason: 'verification unavailable',
       });
       expect(transcriptionCallCount).toBe(2);
-      expect(session.buffer.getRecent()).toHaveLength(0);
+      const recent = session.buffer.getRecent();
+      expect(recent).toHaveLength(1);
+      expect(recent[0].suppressed).toBe(true);
 
       captureSocket.close();
+    });
+
+    it('gives a viewer joining while a line is suppressed a placeholder at the correct position', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const before = session.buffer.append('Before the flag', Date.now());
+      const flagged = session.buffer.append('Mishe*rd line', Date.now(), true);
+      const after = session.buffer.append('After the flag', Date.now());
+
+      (geminiClient.models.generateContent as any).mockResolvedValueOnce({
+        text: '{"translations":["你好","你好"]}',
+      });
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      const backlogMessage = await waitForMessage(viewerSocket);
+
+      expect(backlogMessage).toEqual({
+        type: 'backlog',
+        lines: [
+          { id: before.id, english: 'Before the flag', translated: '你好' },
+          { id: flagged.id, english: '', translated: '', removed: true },
+          { id: after.id, english: 'After the flag', translated: '你好' },
+        ],
+      });
+
+      captureSocket.close();
+      viewerSocket.close();
     });
   });
 
