@@ -31,4 +31,15 @@ describe('toCsv', () => {
     const result = toCsv(['A'], [['plain text']]);
     expect(result).toBe('A\r\nplain text\r\n');
   });
+
+  it('prefixes a field starting with = with a single quote to prevent CSV formula injection', () => {
+    const result = toCsv(['A'], [['=HYPERLINK("http://evil.com")']]);
+    expect(result).toBe('A\r\n"\'=HYPERLINK(""http://evil.com"")"\r\n');
+  });
+
+  it('prefixes fields starting with +, -, or @ with a single quote', () => {
+    expect(toCsv(['A'], [['+1+1']])).toBe("A\r\n'+1+1\r\n");
+    expect(toCsv(['A'], [['-1-1']])).toBe("A\r\n'-1-1\r\n");
+    expect(toCsv(['A'], [['@SUM(1,1)']])).toBe('A\r\n"\'@SUM(1,1)"\r\n');
+  });
 });

@@ -19,7 +19,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 
 export function createApp(deps: AppDeps): Express {
   const app = express();
-  app.use(cors());
+  app.use(cors({ exposedHeaders: ['Content-Disposition'] }));
   app.use(express.json());
 
   app.get('/health', (_req, res) => {

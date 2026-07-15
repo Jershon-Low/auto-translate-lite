@@ -186,6 +186,17 @@ describe('POST /viewer-feedback/:id/download', () => {
     expect(response.text).toContain('unclear');
     expect(deps.viewerFeedbackStore.get(id)?.downloaded).toBe(true);
   });
+
+  it('exposes the Content-Disposition header for cross-origin download requests', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+    await request(app).post('/viewer-feedback').send({ language: 'fr', lineIndex: 0, english: 'A', translated: 'a' });
+    const [{ id }] = deps.viewerFeedbackStore.list();
+
+    const response = await request(app).post(`/viewer-feedback/${id}/download`);
+
+    expect(response.headers['access-control-expose-headers']).toContain('Content-Disposition');
+  });
 });
 
 describe('POST /viewer-feedback/download-all', () => {
