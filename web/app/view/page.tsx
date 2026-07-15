@@ -21,6 +21,7 @@ function ViewerPageContent() {
   const [showJumpButton, setShowJumpButton] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [showDisclaimer, setShowDisclaimer] = useState(true);
 
   type LineFeedbackMode = 'idle' | 'open' | 'submitting' | 'submitted' | 'flagged' | 'error';
   interface LineFeedbackState {
@@ -231,15 +232,26 @@ function ViewerPageContent() {
       {showJumpButton && (
         <button
           onClick={jumpToLatest}
-          className="fixed bottom-6 right-6 bg-primary text-primary-foreground rounded-full px-4 py-2 shadow-lg"
+          className={`fixed right-6 ${showDisclaimer ? 'bottom-28' : 'bottom-6'} bg-primary text-primary-foreground rounded-full px-4 py-2 shadow-lg`}
         >
           Jump to latest ↓
         </button>
       )}
-      <div className="px-6 sm:px-10 pt-3 pb-2 text-xs text-muted-foreground border-b bg-muted/30 space-y-1">
-        <p>{EN_FALLBACK.disclaimer}</p>
-        {strings !== EN_FALLBACK && <p className="py-2">{strings.disclaimer}</p>}
-      </div>  
+      {showDisclaimer && (
+        <div className="fixed inset-x-0 bottom-0 z-50 border-t bg-background shadow-[0_-4px_12px_rgba(0,0,0,0.15)]">
+          <div className="relative mx-auto flex max-w-3xl flex-col items-center justify-center px-6 sm:px-10 py-4 pr-10 text-xs text-muted-foreground space-y-1">
+            <button
+              onClick={() => setShowDisclaimer(false)}
+              aria-label="Dismiss"
+              className="absolute top-2 right-2 text-base leading-none text-muted-foreground hover:text-foreground"
+            >
+              ×
+            </button>
+            <p>{EN_FALLBACK.disclaimer}</p>
+            {strings !== EN_FALLBACK && <p>{strings.disclaimer}</p>}
+          </div>
+        </div>
+      )}
     </main>
   );
 }
