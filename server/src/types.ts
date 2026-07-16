@@ -3,4 +3,5 @@ export interface CaptionLine {
   timestampMs: number;
   english: string;
   suppressed: boolean;
+  pendingTranslations?: Record<string, string>;
 }

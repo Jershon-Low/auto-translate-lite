@@ -6,11 +6,21 @@ const BUFFER_WINDOW_MS = 10 * 60 * 1000;
 export class TranscriptBuffer {
   private lines: CaptionLine[] = [];
 
-  append(english: string, timestampMs: number = Date.now(), suppressed: boolean = false): CaptionLine {
-    const line: CaptionLine = { id: randomUUID(), timestampMs, english, suppressed };
+  append(
+    english: string,
+    timestampMs: number = Date.now(),
+    suppressed: boolean = false,
+    pendingTranslations?: Record<string, string>
+  ): CaptionLine {
+    const line: CaptionLine = { id: randomUUID(), timestampMs, english, suppressed, pendingTranslations };
     this.lines.push(line);
     this.trim(timestampMs);
     return line;
+  }
+
+  peek(id: string, nowMs: number = Date.now()): CaptionLine | null {
+    this.trim(nowMs);
+    return this.lines.find((candidate) => candidate.id === id) ?? null;
   }
 
   getRecent(nowMs: number = Date.now()): CaptionLine[] {

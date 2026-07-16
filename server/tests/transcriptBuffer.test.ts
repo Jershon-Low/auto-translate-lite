@@ -37,6 +37,39 @@ describe('TranscriptBuffer', () => {
     expect(buffer.getRecent(1000)).toHaveLength(1);
   });
 
+  it('append() stores pendingTranslations when provided', () => {
+    const buffer = new TranscriptBuffer();
+    const line = buffer.append('Hidden', 1000, true, { zh: '你好' });
+    expect(line.pendingTranslations).toEqual({ zh: '你好' });
+  });
+
+  it('append() leaves pendingTranslations undefined when not provided', () => {
+    const buffer = new TranscriptBuffer();
+    const line = buffer.append('Hello', 1000);
+    expect(line.pendingTranslations).toBeUndefined();
+  });
+
+  describe('peek', () => {
+    it('returns the matching line without mutating its suppressed state', () => {
+      const buffer = new TranscriptBuffer();
+      const line = buffer.append('Hidden', 1000, true, { zh: '你好' });
+      expect(buffer.peek(line.id, 1000)).toEqual(line);
+      expect(buffer.peek(line.id, 1000)?.suppressed).toBe(true);
+    });
+
+    it('returns null for an unknown id', () => {
+      const buffer = new TranscriptBuffer();
+      expect(buffer.peek('does-not-exist', 1000)).toBeNull();
+    });
+
+    it('returns null once the line has been trimmed out of the 10-minute window', () => {
+      const buffer = new TranscriptBuffer();
+      const line = buffer.append('Old', 0);
+      const elevenMinutesLater = 11 * 60 * 1000;
+      expect(buffer.peek(line.id, elevenMinutesLater)).toBeNull();
+    });
+  });
+
   describe('reinstate', () => {
     it('flips suppressed to false and updates the text, preserving id and position', () => {
       const buffer = new TranscriptBuffer();
