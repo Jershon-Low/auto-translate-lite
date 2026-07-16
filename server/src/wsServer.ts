@@ -142,6 +142,8 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                   error: error instanceof Error ? error.message : String(error),
                 });
               });
+          } else if (message.type === 'set-mode') {
+            deps.session.mode = message.mode === 'manual' ? 'manual' : 'automatic';
           }
         } else if (deepgramConnection) {
           deepgramConnection.send(data as Buffer);
@@ -281,11 +283,27 @@ async function handleFinalSegment(
     translateWithFallback(deps, english, activeLanguages, precedingContext, sermonCache),
   ]);
 
-  if (!transcriptionResult.safe) {
-    void logEvent('warn', { event: 'transcription_flagged', english, reason: transcriptionResult.reason });
-    const line = deps.session.buffer.append(english, Date.now(), true);
+  const manualHold = deps.session.mode === 'manual';
+
+  if (!transcriptionResult.safe || manualHold) {
+    if (!transcriptionResult.safe) {
+      void logEvent('warn', { event: 'transcription_flagged', english, reason: transcriptionResult.reason });
+    }
+    const reason = manualHold
+      ? transcriptionResult.safe
+        ? 'Pending manual approval'
+        : `Pending manual approval — AI also flagged: ${transcriptionResult.reason}`
+      : transcriptionResult.reason;
+    const line = deps.session.buffer.append(english, Date.now(), true, translations);
     captureSocket.send(
-      JSON.stringify({ type: 'transcript', id: line.id, english, flagged: true, reason: transcriptionResult.reason })
+      JSON.stringify({
+        type: 'transcript',
+        id: line.id,
+        english,
+        flagged: true,
+        reason,
+        ...(manualHold ? { pending: true } : {}),
+      })
     );
     const removedPayload = JSON.stringify({ type: 'line-removed', id: line.id });
     for (const viewerSocket of deps.session.getAllViewers()) {

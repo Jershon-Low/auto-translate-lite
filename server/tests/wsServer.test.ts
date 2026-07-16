@@ -1313,6 +1313,113 @@ describe('wsServer', () => {
     });
   });
 
+  describe('manual approval mode', () => {
+    it('suppresses every safe line as pending when the session is in manual mode', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const viewerMessages: any[] = [];
+      viewerSocket.on('message', (data) => viewerMessages.push(JSON.parse(data.toString())));
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const transcript = await transcriptPromise;
+
+      expect(transcript).toEqual({
+        type: 'transcript',
+        id: expect.any(String),
+        english: 'Hello everyone',
+        flagged: true,
+        reason: 'Pending manual approval',
+        pending: true,
+      });
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(viewerMessages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+
+      const recent = session.buffer.getRecent();
+      expect(recent[0]).toMatchObject({ id: transcript.id, suppressed: true });
+      expect(recent[0].pendingTranslations).toEqual({ zh: '你好' });
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('combines the AI flag reason with the manual-approval reason when both apply', async () => {
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":false,"reason":"likely mis-heard negation"}' });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+      // set-mode has no ack message, so (unlike other capture-socket messages
+      // in this file) there's nothing to `waitForMessage` on to know the
+      // server has processed it. Give the real socket I/O a tick to land
+      // before triggering onFinalSegment directly, mirroring the same
+      // real-socket-latency wait used in the "cost tracking" tests below.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
+      const transcript = await transcriptPromise;
+
+      expect(transcript).toEqual({
+        type: 'transcript',
+        id: expect.any(String),
+        english: 'Jesus is not the son of God',
+        flagged: true,
+        reason: 'Pending manual approval — AI also flagged: likely mis-heard negation',
+        pending: true,
+      });
+
+      captureSocket.close();
+    });
+
+    it('switching from manual back to automatic mid-session only affects new lines, leaving already-pending lines suppressed', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+      // See the comment in the previous test: set-mode has no ack, so give
+      // the real socket I/O a tick to land before triggering onFinalSegment.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const firstTranscriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('First line');
+      const firstTranscript = await firstTranscriptPromise;
+      expect(firstTranscript.pending).toBe(true);
+
+      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'automatic' }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const secondTranscriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Second line');
+      const secondTranscript = await secondTranscriptPromise;
+      expect(secondTranscript).toEqual({ type: 'transcript', id: expect.any(String), english: 'Second line' });
+
+      const recent = session.buffer.getRecent();
+      expect(recent.find((line) => line.id === firstTranscript.id)?.suppressed).toBe(true);
+      expect(recent.find((line) => line.id === secondTranscript.id)?.suppressed).toBe(false);
+
+      captureSocket.close();
+    });
+  });
+
   describe('segment processing order', () => {
     it('processes segments strictly in arrival order even if a later segment finishes its Gemini calls first', async () => {
       let resolveFirst!: (value: { text: string }) => void;
