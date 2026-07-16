@@ -572,7 +572,7 @@ describe('wsServer', () => {
       viewerSocket.close();
     });
 
-    it('retries a failed verification without persisting the null cache reference back onto the session', async () => {
+    it('drops the stale translation-verifier cache reference on verification retry and self-heals subsequent segments', async () => {
       let verifyCallCount = 0;
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
         if (params.contents.includes('transcription accuracy checker')) {
@@ -614,9 +614,87 @@ describe('wsServer', () => {
       expect(verifyCalls).toHaveLength(2);
       expect(verifyCalls[0][0].config.cachedContent).toBe('cachedContents/test');
       expect(verifyCalls[1][0].config).not.toHaveProperty('cachedContent');
-      // Unlike translation, a failed verification retry does not persist the
-      // null cache reference back onto the session (matches pre-existing behavior).
+
+      // Cross-segment self-healing: like translation, the translationVerifier
+      // role's cache is cleared after a failed-then-retried verification, so a
+      // later segment must not even attempt to use it, while the other two
+      // roles' caches are untouched.
+      expect(session.roleCaches.translationVerifier).toBeNull();
+      expect(session.roleCaches.transcriptionVerifier).toEqual({ name: 'cachedContents/test' });
+
+      const captionPromise2 = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('A later segment');
+      await captionPromise2;
+
+      const verifyCallsAfter = (geminiClient.models.generateContent as any).mock.calls.filter((call: any) =>
+        call[0].contents.includes('safety checker')
+      );
+      expect(verifyCallsAfter).toHaveLength(3);
+      expect(verifyCallsAfter[2][0].config).not.toHaveProperty('cachedContent');
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('drops the stale transcription-verifier cache reference on verification retry and self-heals subsequent segments', async () => {
+      let transcriptionCheckCallCount = 0;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          transcriptionCheckCallCount += 1;
+          if (transcriptionCheckCallCount === 1) {
+            return Promise.reject(new Error('cachedContent reference expired'));
+          }
+          return Promise.resolve({ text: '{"safe":true,"reason":""}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: '' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('Cain killed Abel');
+      const caption = await captionPromise;
+
+      expect(caption).toEqual({ type: 'caption', id: expect.any(String), english: 'Cain killed Abel', translated: '你好' });
+      expect(transcriptionCheckCallCount).toBe(2);
+
+      const transcriptionCheckCalls = (geminiClient.models.generateContent as any).mock.calls.filter((call: any) =>
+        call[0].contents.includes('transcription accuracy checker')
+      );
+      expect(transcriptionCheckCalls).toHaveLength(2);
+      expect(transcriptionCheckCalls[0][0].config.cachedContent).toBe('cachedContents/test');
+      expect(transcriptionCheckCalls[1][0].config).not.toHaveProperty('cachedContent');
+
+      // Cross-segment self-healing: like translation, the transcriptionVerifier
+      // role's cache is cleared after a failed-then-retried check, so a later
+      // segment must not even attempt to use it, while the other two roles'
+      // caches are untouched.
+      expect(session.roleCaches.transcriptionVerifier).toBeNull();
       expect(session.roleCaches.translationVerifier).toEqual({ name: 'cachedContents/test' });
+
+      const captionPromise2 = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('A later segment');
+      await captionPromise2;
+
+      const transcriptionCheckCallsAfter = (geminiClient.models.generateContent as any).mock.calls.filter((call: any) =>
+        call[0].contents.includes('transcription accuracy checker')
+      );
+      expect(transcriptionCheckCallsAfter).toHaveLength(3);
+      expect(transcriptionCheckCallsAfter[2][0].config).not.toHaveProperty('cachedContent');
 
       captureSocket.close();
       viewerSocket.close();

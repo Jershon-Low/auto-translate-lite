@@ -347,9 +347,10 @@ async function translateWithFallback(
   precedingContext: string[]
 ): Promise<Record<string, string>> {
   if (activeLanguages.length === 0) return {};
-  // deps.session.providers is populated synchronously in the 'start' handler
-  // before the Deepgram connection (the only source of onFinalSegment calls,
-  // which is what drives this function) is created — see handleCaptureConnection.
+  // deps.session.providers is assigned in the 'start' handler before the
+  // Deepgram connection is created, and the Deepgram connection is the only
+  // source of onFinalSegment calls that drive this function — so providers is
+  // always populated by the time this runs. See handleCaptureConnection.
   const provider = deps.session.providers!.translation;
   try {
     return await provider.translate(english, activeLanguages, precedingContext, deps.session.roleCaches.translation);
@@ -378,6 +379,7 @@ async function verifyTranscriptionWithRetry(
   try {
     return await provider.verifyTranscription(english, precedingContext, cacheRef);
   } catch {
+    deps.session.roleCaches.transcriptionVerifier = null;
     try {
       return await provider.verifyTranscription(english, precedingContext, null);
     } catch (secondError) {
@@ -401,6 +403,7 @@ async function verifyTranslationsWithRetry(
   try {
     return await provider.verifyTranslations(items, cacheRef);
   } catch {
+    deps.session.roleCaches.translationVerifier = null;
     try {
       return await provider.verifyTranslations(items, null);
     } catch (secondError) {
@@ -467,7 +470,7 @@ async function ensureBacklogCached(
         cache.set(language, line.id, translated);
         return;
       }
-      logTranslationFallback(language, line.english, translated, verification?.reason ?? 'verification unavailable');
+      logTranslationFallback(language, line.english, translated, verification?.reason || 'verification unavailable');
       cache.set(language, line.id, line.english);
     });
   })();
