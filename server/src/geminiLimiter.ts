@@ -5,6 +5,7 @@ export class GeminiCallLimiter {
   constructor(private readonly maxConcurrent: number = 15) {}
 
   async run<T>(fn: () => Promise<T>): Promise<T> {
+    console.log(`GeminiCallLimiter: active=${this.active}, queue length=${this.queue.length}`);
     await this.acquire();
     try {
       return await fn();
