@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import { TranscriptBuffer } from './transcriptBuffer.js';
+import { TranslationCache } from './translationCache.js';
 import type { SermonCacheRef } from './gemini.js';
 
 export class Session {
@@ -8,6 +9,8 @@ export class Session {
   isActive: boolean = false;
   buffer: TranscriptBuffer = new TranscriptBuffer();
   sermonCache: SermonCacheRef | null = null;
+  translationCache: TranslationCache = new TranslationCache();
+  inFlightFills: Map<string, Promise<void>> = new Map();
   private viewers: Map<WebSocket, string> = new Map();
 
   start(): void {
@@ -15,6 +18,8 @@ export class Session {
     this.isActive = true;
     this.buffer.clear();
     this.sermonCache = null;
+    this.translationCache = new TranslationCache();
+    this.inFlightFills = new Map();
   }
 
   stop(): void {
