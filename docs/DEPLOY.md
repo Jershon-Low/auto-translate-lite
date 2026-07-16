@@ -55,7 +55,7 @@ cd ../web && npm install && npm run build
 ```
 
 ## 4. Configure environment variables
-- `server/.env`: `DEEPGRAM_API_KEY`, `GEMINI_API_KEY`, `PORT=3001`.
+- `server/.env`: `DEEPGRAM_API_KEY`, `GEMINI_API_KEY`, `PORT=3001`, `ADMIN_PASSCODE` (gates `/admin/*` — the admin routes return 401 for everyone, including you, until this is set).
 - `web/.env.production`: `NEXT_PUBLIC_WS_URL=wss://54-123-45-67.sslip.io` (substitute your own instance's hostname — the sslip.io one from Step 1, or your real domain).
 
 ## 5. Install and configure Caddy as a reverse proxy (automatic HTTPS)
@@ -71,6 +71,8 @@ sudo apt install -y caddy
   reverse_proxy /sermon-doc localhost:3001
   reverse_proxy /feedback localhost:3001
   reverse_proxy /viewer-feedback* localhost:3001
+  reverse_proxy /admin/model-config localhost:3001
+  reverse_proxy /admin/prompt-config localhost:3001
   reverse_proxy localhost:3000
 }
 ```
