@@ -87,6 +87,32 @@ describe('verifyTranslations', () => {
     expect(call.config.cachedContent).toBe('cachedContents/abc');
   });
 
+  it('does not duplicate the routing marker sentence when no cache ref is provided, keeping contents byte-identical to the pre-refactor prompt', async () => {
+    const client = fakeClient('{"zh":{"safe":true,"reason":""}}');
+    await verifyTranslations(
+      client,
+      MODEL,
+      [{ id: 'zh', english: 'Hello', translated: '你好' }],
+      TRANSLATION_VERIFIER_DEFAULT_NOTES
+    );
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.contents).not.toContain('This is a safety checker');
+    expect(call.contents.startsWith('You are a safety checker')).toBe(true);
+  });
+
+  it('still contains the safety-checker marker substring when a cache ref is provided, so response routing keeps working', async () => {
+    const client = fakeClient('{"zh":{"safe":true,"reason":""}}');
+    await verifyTranslations(
+      client,
+      MODEL,
+      [{ id: 'zh', english: 'Hello', translated: '你好' }],
+      TRANSLATION_VERIFIER_DEFAULT_NOTES,
+      { name: 'cachedContents/abc' }
+    );
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.contents).toContain('safety checker');
+  });
+
   it('omits notes and fixed rules from contents when a cache ref is provided', async () => {
     const client = fakeClient('{"zh":{"safe":true,"reason":""}}');
     await verifyTranslations(

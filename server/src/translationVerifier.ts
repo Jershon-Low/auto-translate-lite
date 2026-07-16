@@ -40,12 +40,17 @@ export async function verifyTranslations(
   const instructionBlock = cacheRef
     ? ''
     : `${TRANSLATION_VERIFIER_FIXED_RULES_INTRO}\n\n${notes}\n\n${TRANSLATION_VERIFIER_FIXED_RULES_OUTRO}\n\n`;
+  // The marker sentence below only exists so the wsServer.ts test double can route fake
+  // responses by matching a substring in `contents`. When cacheRef is set, `instructionBlock`
+  // is empty (the INTRO text lives in the cache's systemInstruction instead), so the marker is
+  // needed to keep that substring present. When cacheRef is null, `instructionBlock` already
+  // starts with the INTRO text containing the same substring, so omit the marker to avoid
+  // duplicating it and keep the uncached prompt byte-identical to before this refactor.
+  const cacheRouterMarker = cacheRef ? 'This is a safety checker for live captions at an Australian church sermon.\n\n' : '';
 
   const response = await client.models.generateContent({
     model,
-    contents: `This is a safety checker for live captions at an Australian church sermon.
-
-${instructionBlock}Pairs:
+    contents: `${cacheRouterMarker}${instructionBlock}Pairs:
 ${pairs}
 
 Return, for each id, whether it is safe and a short reason.`,

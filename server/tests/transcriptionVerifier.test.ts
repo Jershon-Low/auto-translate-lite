@@ -62,6 +62,21 @@ describe('verifyTranscription', () => {
     expect(call.contents).toContain('transcription accuracy checker');
   });
 
+  it('does not duplicate the routing marker sentence when no cache ref is provided, keeping contents byte-identical to the pre-refactor prompt', async () => {
+    const client = fakeClient('{"safe":true,"reason":""}');
+    await verifyTranscription(client, MODEL, 'Hello', TRANSCRIPTION_VERIFIER_DEFAULT_NOTES);
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.contents).not.toContain('This is a transcription accuracy checker');
+    expect(call.contents.startsWith('You are a transcription accuracy checker')).toBe(true);
+  });
+
+  it('still contains the transcription-accuracy-checker marker substring when a cache ref is provided, so response routing keeps working', async () => {
+    const client = fakeClient('{"safe":true,"reason":""}');
+    await verifyTranscription(client, MODEL, 'Hello', TRANSCRIPTION_VERIFIER_DEFAULT_NOTES, [], { name: 'cachedContents/abc' });
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.contents).toContain('transcription accuracy checker');
+  });
+
   it('includes cachedContent in the request config when a cache ref is provided', async () => {
     const client = fakeClient('{"safe":true,"reason":""}');
     await verifyTranscription(client, MODEL, 'Hello', TRANSCRIPTION_VERIFIER_DEFAULT_NOTES, [], { name: 'cachedContents/abc' });
@@ -69,7 +84,7 @@ describe('verifyTranscription', () => {
     expect(call.config.cachedContent).toBe('cachedContents/abc');
   });
 
-  it('omits cachedContent, notes, and fixed rules from contents when no cache ref is provided is false — omits them only when a cache ref IS provided', async () => {
+  it('omits notes and fixed rules from contents when a cache ref is provided', async () => {
     const client = fakeClient('{"safe":true,"reason":""}');
     await verifyTranscription(client, MODEL, 'Hello', TRANSCRIPTION_VERIFIER_DEFAULT_NOTES, [], { name: 'cachedContents/abc' });
     const call = (client.models.generateContent as any).mock.calls[0][0];
