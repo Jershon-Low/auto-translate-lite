@@ -72,4 +72,18 @@ describe('Session', () => {
     session.start();
     expect(session.sermonCache).toBeNull();
   });
+
+  it('start() replaces the translation cache, discarding anything cached in the previous session', () => {
+    const session = new Session();
+    session.translationCache.set('zh', 'old-line', '你好');
+    session.start();
+    expect(session.translationCache.get('zh', 'old-line')).toBeUndefined();
+  });
+
+  it('start() replaces the in-flight fill map, discarding anything tracked in the previous session', () => {
+    const session = new Session();
+    session.inFlightFills.set('zh', Promise.resolve());
+    session.start();
+    expect(session.inFlightFills.size).toBe(0);
+  });
 });
