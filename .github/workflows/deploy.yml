@@ -39,4 +39,5 @@ jobs:
             pm2 restart ecosystem.config.js --update-env
             pm2 save
 
+            sleep 5
             curl -fsS http://localhost:3001/health
