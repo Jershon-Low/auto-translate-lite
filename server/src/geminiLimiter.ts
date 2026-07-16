@@ -2,7 +2,7 @@ export class GeminiCallLimiter {
   private active = 0;
   private readonly queue: Array<() => void> = [];
 
-  constructor(private readonly maxConcurrent: number = 8) {}
+  constructor(private readonly maxConcurrent: number = 15) {}
 
   async run<T>(fn: () => Promise<T>): Promise<T> {
     await this.acquire();
