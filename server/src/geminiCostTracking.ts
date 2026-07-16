@@ -9,6 +9,7 @@ export function withCostTracking(client: GeminiClient, tracker: CostTracker): Ge
         const usage = response.usageMetadata;
         if (usage) {
           tracker.recordGeminiUsage({
+            model: params.model,
             promptTokens: usage.promptTokenCount ?? 0,
             candidatesTokens: usage.candidatesTokenCount ?? 0,
             cachedTokens: usage.cachedContentTokenCount ?? 0,

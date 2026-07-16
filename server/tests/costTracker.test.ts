@@ -40,11 +40,40 @@ describe('createCostTracker', () => {
     const tracker = createCostTracker(join(tempDir, 'cost.json'));
 
     // 1,000,000 prompt tokens, 200,000 of which came from cache; 100,000 candidate tokens.
-    tracker.recordGeminiUsage({ promptTokens: 1_000_000, candidatesTokens: 100_000, cachedTokens: 200_000 });
+    tracker.recordGeminiUsage({
+      model: 'gemini-3.1-flash-lite',
+      promptTokens: 1_000_000,
+      candidatesTokens: 100_000,
+      cachedTokens: 200_000,
+    });
 
     // 800k non-cached @ $0.25/1M = $0.20; 200k cached @ $0.025/1M = $0.005; 100k output @ $1.50/1M = $0.15
     expect(tracker.getSessionCostUsd()).toBeCloseTo(0.355, 6);
     expect(tracker.getLifetimeCostUsd()).toBeCloseTo(0.355, 6);
+  });
+
+  it('charges gemini-3.5-flash usage at its own (pricier) rate, not gemini-3.1-flash-lite\'s', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'cost-test-'));
+    const tracker = createCostTracker(join(tempDir, 'cost.json'));
+
+    tracker.recordGeminiUsage({
+      model: 'gemini-3.5-flash',
+      promptTokens: 1_000_000,
+      candidatesTokens: 100_000,
+      cachedTokens: 200_000,
+    });
+
+    // 800k non-cached @ $1.50/1M = $1.20; 200k cached @ $0.15/1M = $0.03; 100k output @ $9.00/1M = $0.90
+    expect(tracker.getSessionCostUsd()).toBeCloseTo(2.13, 6);
+  });
+
+  it('defaults to gemini-3.1-flash-lite pricing when model is omitted, for backward compatibility', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'cost-test-'));
+    const tracker = createCostTracker(join(tempDir, 'cost.json'));
+
+    tracker.recordGeminiUsage({ promptTokens: 1_000_000, candidatesTokens: 100_000, cachedTokens: 200_000 });
+
+    expect(tracker.getSessionCostUsd()).toBeCloseTo(0.355, 6);
   });
 
   it('charges Deepgram usage at the per-minute rate', async () => {

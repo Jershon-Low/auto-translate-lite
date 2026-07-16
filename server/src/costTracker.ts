@@ -4,6 +4,7 @@ import { GEMINI_PRICING_USD_PER_MILLION_TOKENS, DEEPGRAM_PRICING_USD_PER_MINUTE 
 import { logEvent } from './logger.js';
 
 export interface GeminiUsage {
+  model?: string;
   promptTokens: number;
   candidatesTokens: number;
   cachedTokens: number;
@@ -64,7 +65,12 @@ export function createCostTracker(filePath: string): CostTracker {
 
   return {
     recordGeminiUsage(usage: GeminiUsage): void {
-      const pricing = GEMINI_PRICING_USD_PER_MILLION_TOKENS['gemini-3.1-flash-lite'];
+      const model = usage.model ?? 'gemini-3.1-flash-lite';
+      const pricing = (GEMINI_PRICING_USD_PER_MILLION_TOKENS as Record<string, { input: number; cachedInput: number; output: number } | undefined>)[model];
+      if (!pricing) {
+        void logEvent('warn', { event: 'unknown_gemini_pricing_model', model });
+        return;
+      }
       const nonCachedPromptTokens = Math.max(0, usage.promptTokens - usage.cachedTokens);
       const cost =
         (nonCachedPromptTokens / 1_000_000) * pricing.input +

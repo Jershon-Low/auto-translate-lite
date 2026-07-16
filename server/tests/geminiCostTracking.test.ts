@@ -47,6 +47,7 @@ describe('withCostTracking', () => {
       usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20, cachedContentTokenCount: 10 },
     });
     expect(tracker.recordGeminiUsage).toHaveBeenCalledWith({
+      model: 'gemini-3.1-flash-lite',
       promptTokens: 100,
       candidatesTokens: 20,
       cachedTokens: 10,
@@ -65,6 +66,7 @@ describe('withCostTracking', () => {
     });
 
     expect(tracker.recordGeminiUsage).toHaveBeenCalledWith({
+      model: 'gemini-3.1-flash-lite',
       promptTokens: 0,
       candidatesTokens: 0,
       cachedTokens: 0,
