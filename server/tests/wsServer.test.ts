@@ -1418,6 +1418,142 @@ describe('wsServer', () => {
 
       captureSocket.close();
     });
+
+    it('approving an unedited manual-mode line reuses the cached translation instead of calling Gemini again', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const pending = await transcriptPromise;
+
+      const translateCallsBeforeApprove = (geminiClient.models.generateContent as any).mock.calls.filter(
+        isTranslateCall
+      ).length;
+
+      const ackPromise = waitForMessage(captureSocket);
+      const insertedPromise = waitForMessage(viewerSocket);
+      captureSocket.send(JSON.stringify({ type: 'reinstate', id: pending.id, english: pending.english }));
+      await ackPromise;
+      const inserted = await insertedPromise;
+
+      expect(inserted).toEqual({
+        type: 'caption-inserted',
+        id: pending.id,
+        english: 'Hello everyone',
+        translated: '你好',
+      });
+
+      const translateCallsAfterApprove = (geminiClient.models.generateContent as any).mock.calls.filter(
+        isTranslateCall
+      ).length;
+      expect(translateCallsAfterApprove).toBe(translateCallsBeforeApprove);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('approving translates only languages that became active after the line was held, reusing the rest from cache', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+      // set-mode has no ack message, so give the real socket I/O a tick to
+      // land before triggering onFinalSegment directly (see the comment in
+      // the "combines the AI flag reason..." test above).
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // No viewers yet: the line is held with an empty translation cache.
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const pending = await transcriptPromise;
+      expect(session.buffer.getRecent()[0].pendingTranslations).toEqual({});
+
+      // A viewer joins zh after the line was held but before it's approved.
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: [] (the line is suppressed, not included)
+
+      const ackPromise = waitForMessage(captureSocket);
+      const insertedPromise = waitForMessage(viewerSocket);
+      captureSocket.send(JSON.stringify({ type: 'reinstate', id: pending.id, english: pending.english }));
+      await ackPromise;
+      const inserted = await insertedPromise;
+
+      expect(inserted).toEqual({
+        type: 'caption-inserted',
+        id: pending.id,
+        english: 'Hello everyone',
+        translated: '你好',
+      });
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('editing the text before approving discards the cache and re-translates', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket);
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+      // set-mode has no ack message, so give the real socket I/O a tick to
+      // land before triggering onFinalSegment directly (see the comment in
+      // the "combines the AI flag reason..." test above).
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const pending = await transcriptPromise;
+
+      // The line was held (suppressed) on arrival, so handleFinalSegment also
+      // broadcasts a 'line-removed' message to the already-subscribed viewer.
+      // That message and the 'transcript' message above are sent over two
+      // separate socket connections, so there's no guarantee both have been
+      // delivered by the time `pending` resolves. Give the real socket I/O a
+      // tick to land here — with no listener attached, it's harmlessly
+      // dropped — so it can't race with and be mistaken for the reinstate's
+      // 'caption-inserted' message below.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: '{"zh":{"safe":true,"reason":"ok"}}' });
+        }
+        return Promise.resolve({ text: '{"zh":"大家好"}' });
+      });
+
+      const ackPromise = waitForMessage(captureSocket);
+      const insertedPromise = waitForMessage(viewerSocket);
+      captureSocket.send(JSON.stringify({ type: 'reinstate', id: pending.id, english: 'Hello, everyone!' }));
+      await ackPromise;
+      const inserted = await insertedPromise;
+
+      expect(inserted).toEqual({
+        type: 'caption-inserted',
+        id: pending.id,
+        english: 'Hello, everyone!',
+        translated: '大家好',
+      });
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
   });
 
   describe('segment processing order', () => {

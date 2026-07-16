@@ -230,21 +230,38 @@ async function handleReinstate(
     return;
   }
 
+  const existing = deps.session.buffer.peek(id);
+  if (existing === null || !existing.suppressed) {
+    captureSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'not found' }));
+    return;
+  }
+
+  const originalEnglish = existing.english;
+  const cachedTranslations = existing.pendingTranslations ?? {};
+  const precedingContext = deps.session.buffer.precedingContextFor(id, PRECEDING_CONTEXT_LINES);
+  const activeLanguages = deps.session.getActiveLanguages();
+
+  let translations: Record<string, string>;
+  if (trimmed === originalEnglish) {
+    const cachedLanguages = activeLanguages.filter((language) => cachedTranslations[language] !== undefined);
+    const newLanguages = activeLanguages.filter((language) => cachedTranslations[language] === undefined);
+    const freshTranslations =
+      newLanguages.length > 0
+        ? await translateWithFallback(deps, trimmed, newLanguages, precedingContext, deps.session.sermonCache)
+        : {};
+    translations = {
+      ...Object.fromEntries(cachedLanguages.map((language) => [language, cachedTranslations[language]])),
+      ...freshTranslations,
+    };
+  } else {
+    translations = await translateWithFallback(deps, trimmed, activeLanguages, precedingContext, deps.session.sermonCache);
+  }
+
   const line = deps.session.buffer.reinstate(id, trimmed);
   if (line === null) {
     captureSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'not found' }));
     return;
   }
-
-  const precedingContext = deps.session.buffer.precedingContextFor(line.id, PRECEDING_CONTEXT_LINES);
-  const activeLanguages = deps.session.getActiveLanguages();
-  const translations = await translateWithFallback(
-    deps,
-    line.english,
-    activeLanguages,
-    precedingContext,
-    deps.session.sermonCache
-  );
 
   await finishPublishing(line, translations, deps, captureSocket, 'caption-inserted');
 }
