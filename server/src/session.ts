@@ -11,6 +11,7 @@ export class Session {
   sermonCache: SermonCacheRef | null = null;
   translationCache: TranslationCache = new TranslationCache();
   inFlightFills: Map<string, Promise<void>> = new Map();
+  mode: 'automatic' | 'manual' = 'automatic';
   private viewers: Map<WebSocket, string> = new Map();
 
   start(): void {

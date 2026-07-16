@@ -86,4 +86,16 @@ describe('Session', () => {
     session.start();
     expect(session.inFlightFills.size).toBe(0);
   });
+
+  it('defaults mode to automatic', () => {
+    const session = new Session();
+    expect(session.mode).toBe('automatic');
+  });
+
+  it('start() does not reset mode — it is an operator preference, not session data', () => {
+    const session = new Session();
+    session.mode = 'manual';
+    session.start();
+    expect(session.mode).toBe('manual');
+  });
 });
