@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { translateSegment, translateBacklog, type GeminiClient } from '../src/gemini';
+import { TRANSLATION_DEFAULT_NOTES } from '../src/llmPrompts';
+
+const MODEL = 'gemini-3.1-flash-lite';
 
 function fakeClient(responseText: string): GeminiClient {
   return {
@@ -16,20 +19,20 @@ function fakeClient(responseText: string): GeminiClient {
 describe('translateSegment', () => {
   it('returns parsed translations for the requested languages', async () => {
     const client = fakeClient('{"zh":"你好","ko":"안녕"}');
-    const result = await translateSegment(client, 'Hello', ['zh', 'ko']);
+    const result = await translateSegment(client, MODEL, 'Hello', ['zh', 'ko'], TRANSLATION_DEFAULT_NOTES);
     expect(result).toEqual({ zh: '你好', ko: '안녕' });
   });
 
   it('skips the API call and returns an empty object when no languages are active', async () => {
     const client = fakeClient('{}');
-    const result = await translateSegment(client, 'Hello', []);
+    const result = await translateSegment(client, MODEL, 'Hello', [], TRANSLATION_DEFAULT_NOTES);
     expect(result).toEqual({});
     expect(client.models.generateContent).not.toHaveBeenCalled();
   });
 
-  it('includes Australian slang context and polarity-preservation guidance in the prompt', async () => {
+  it('includes Australian slang context and polarity-preservation guidance in the prompt when uncached', async () => {
     const client = fakeClient('{"zh":"你好"}');
-    await translateSegment(client, "G'day mate, no worries", ['zh']);
+    await translateSegment(client, MODEL, "G'day mate, no worries", ['zh'], TRANSLATION_DEFAULT_NOTES);
 
     const call = (client.models.generateContent as any).mock.calls[0][0];
     expect(call.contents).toContain('Australian slang');
@@ -38,7 +41,7 @@ describe('translateSegment', () => {
 
   it('includes preceding context as reference-only lines when provided', async () => {
     const client = fakeClient('{"zh":"你好"}');
-    await translateSegment(client, 'How are you', ['zh'], ['Hello everyone', 'Welcome to church']);
+    await translateSegment(client, MODEL, 'How are you', ['zh'], TRANSLATION_DEFAULT_NOTES, ['Hello everyone', 'Welcome to church']);
 
     const call = (client.models.generateContent as any).mock.calls[0][0];
     expect(call.contents).toContain('Hello everyone');
@@ -46,9 +49,9 @@ describe('translateSegment', () => {
     expect(call.contents).toContain('do not translate these');
   });
 
-  it('produces an unchanged prompt when no preceding context is given', async () => {
+  it('produces an unchanged prompt when no preceding context is given and no cache is used', async () => {
     const client = fakeClient('{"zh":"你好"}');
-    await translateSegment(client, 'Hello', ['zh']);
+    await translateSegment(client, MODEL, 'Hello', ['zh'], TRANSLATION_DEFAULT_NOTES);
 
     const call = (client.models.generateContent as any).mock.calls[0][0];
     expect(call.contents).toBe(
@@ -59,41 +62,64 @@ describe('translateSegment', () => {
     );
   });
 
-  it('includes cachedContent in the request config when a sermon cache is provided', async () => {
+  it('includes cachedContent in the request config when a cache ref is provided', async () => {
     const client = fakeClient('{"zh":"你好"}');
-    await translateSegment(client, 'Hello', ['zh'], [], { name: 'cachedContents/abc' });
+    await translateSegment(client, MODEL, 'Hello', ['zh'], TRANSLATION_DEFAULT_NOTES, [], { name: 'cachedContents/abc' });
     const call = (client.models.generateContent as any).mock.calls[0][0];
     expect(call.config.cachedContent).toBe('cachedContents/abc');
   });
 
-  it('omits cachedContent from the request config when no sermon cache is provided', async () => {
+  it('omits cachedContent from the request config when no cache ref is provided', async () => {
     const client = fakeClient('{"zh":"你好"}');
-    await translateSegment(client, 'Hello', ['zh']);
+    await translateSegment(client, MODEL, 'Hello', ['zh'], TRANSLATION_DEFAULT_NOTES);
     const call = (client.models.generateContent as any).mock.calls[0][0];
     expect(call.config.cachedContent).toBeUndefined();
+  });
+
+  it('omits the notes and fixed-rules text from contents when a cache ref is provided, since the cache already carries them', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    await translateSegment(client, MODEL, 'Hello', ['zh'], TRANSLATION_DEFAULT_NOTES, [], { name: 'cachedContents/abc' });
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.contents).not.toContain('Australian slang');
+    expect(call.contents).not.toContain('Preserve polarity and negation exactly');
+  });
+
+  it('passes the given model through to generateContent', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    await translateSegment(client, 'gemini-3.5-flash', 'Hello', ['zh'], TRANSLATION_DEFAULT_NOTES);
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.model).toBe('gemini-3.5-flash');
   });
 });
 
 describe('translateBacklog', () => {
   it('returns translations in the same order as the input lines', async () => {
     const client = fakeClient('{"translations":["你好","再见"]}');
-    const result = await translateBacklog(client, ['Hello', 'Goodbye'], 'zh');
+    const result = await translateBacklog(client, MODEL, ['Hello', 'Goodbye'], 'zh', TRANSLATION_DEFAULT_NOTES);
     expect(result).toEqual(['你好', '再见']);
   });
 
   it('skips the API call and returns an empty array for an empty backlog', async () => {
     const client = fakeClient('{"translations":[]}');
-    const result = await translateBacklog(client, [], 'zh');
+    const result = await translateBacklog(client, MODEL, [], 'zh', TRANSLATION_DEFAULT_NOTES);
     expect(result).toEqual([]);
     expect(client.models.generateContent).not.toHaveBeenCalled();
   });
 
-  it('includes Australian slang context and polarity-preservation guidance in the prompt', async () => {
+  it('includes Australian slang context and polarity-preservation guidance in the prompt when uncached', async () => {
     const client = fakeClient('{"translations":["你好"]}');
-    await translateBacklog(client, ["G'day mate, no worries"], 'zh');
+    await translateBacklog(client, MODEL, ["G'day mate, no worries"], 'zh', TRANSLATION_DEFAULT_NOTES);
 
     const call = (client.models.generateContent as any).mock.calls[0][0];
     expect(call.contents).toContain('Australian slang');
     expect(call.contents).toContain('Preserve polarity and negation exactly');
+  });
+
+  it('includes cachedContent in the request config when a cache ref is provided', async () => {
+    const client = fakeClient('{"translations":["你好"]}');
+    await translateBacklog(client, MODEL, ['Hello'], 'zh', TRANSLATION_DEFAULT_NOTES, { name: 'cachedContents/abc' });
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.config.cachedContent).toBe('cachedContents/abc');
+    expect(call.contents).not.toContain('Australian slang');
   });
 });

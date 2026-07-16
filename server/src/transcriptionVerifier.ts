@@ -1,11 +1,10 @@
 import type { GeminiClient, SermonCacheRef } from './gemini.js';
+import { TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO, TRANSCRIPTION_VERIFIER_FIXED_RULES_OUTRO } from './llmPrompts.js';
 
 export interface TranscriptionCheckResult {
   safe: boolean;
   reason: string;
 }
-
-const MODEL = 'gemini-3.1-flash-lite';
 
 function buildContextBlock(precedingContext: string[]): string {
   if (precedingContext.length === 0) return '';
@@ -15,26 +14,21 @@ function buildContextBlock(precedingContext: string[]): string {
 
 export async function verifyTranscription(
   client: GeminiClient,
+  model: string,
   english: string,
+  notes: string,
   precedingContext: string[] = [],
-  sermonCache: SermonCacheRef | null = null
+  cacheRef: SermonCacheRef | null = null
 ): Promise<TranscriptionCheckResult> {
+  const instructionBlock = cacheRef
+    ? ''
+    : `${TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO}\n\n${notes}\n\n${TRANSCRIPTION_VERIFIER_FIXED_RULES_OUTRO}\n\n`;
+
   const response = await client.models.generateContent({
-    model: MODEL,
-    contents: `You are a transcription accuracy checker for live captions at an Australian church sermon. This line was auto-transcribed live from spoken audio by speech-to-text, which occasionally mishears a word — dropping or inserting a "not", mishearing a name, or similar. Decide whether this line, taken at face value, confidently states something false about God, Jesus, the Holy Spirit, or core Christian belief.
+    model,
+    contents: `This is a transcription accuracy checker for live captions at an Australian church sermon.
 
-Do NOT flag a line just because it is idiomatic, informal, or grammatically rough — this sermon includes Australian slang, jokes, and dry humor (e.g. "no worries," "arvo," "having a go," "she'll be right"), and normal spoken imperfection is expected and not a sign of an error.
-
-Language Specific Notes:
-BAHASE INDONESIA: Do NOT flag a line just because it uses the word "Allah" — this is the correct word for God in Indonesian, and is not a misrepresentation of Christian belief.  
-
-Naming Notes:
-CIEL is a cafe in Melbourne, do not remove
-Planetshakers is the church in Melbourne, do not remove
-
-Only mark it unsafe if the line, as transcribed, clearly and confidently misrepresents who God, Jesus, or the Holy Spirit is or does — the kind of thing a dropped or inserted "not" would cause.
-
-${buildContextBlock(precedingContext)}Line: "${english}"
+${instructionBlock}${buildContextBlock(precedingContext)}Line: "${english}"
 
 Return whether it is safe and a short reason.`,
     config: {
@@ -44,7 +38,7 @@ Return whether it is safe and a short reason.`,
         properties: { safe: { type: 'boolean' }, reason: { type: 'string' } },
         required: ['safe', 'reason'],
       },
-      ...(sermonCache ? { cachedContent: sermonCache.name } : {}),
+      ...(cacheRef ? { cachedContent: cacheRef.name } : {}),
     },
   });
 

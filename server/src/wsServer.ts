@@ -11,6 +11,11 @@ import type { SermonDocStore } from './sermonDocStore.js';
 import type { FeedbackStore } from './feedbackStore.js';
 import type { CostTracker } from './costTracker.js';
 import { logEvent } from './logger.js';
+import {
+  TRANSLATION_DEFAULT_NOTES,
+  TRANSCRIPTION_VERIFIER_DEFAULT_NOTES,
+  TRANSLATION_VERIFIER_DEFAULT_NOTES,
+} from './llmPrompts.js';
 
 const PRECEDING_CONTEXT_LINES = 7;
 
@@ -342,11 +347,11 @@ async function translateWithFallback(
 ): Promise<Record<string, string>> {
   if (activeLanguages.length === 0) return {};
   try {
-    return await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext, sermonCache);
+    return await translateSegment(deps.geminiClient, 'gemini-3.1-flash-lite', english, activeLanguages, TRANSLATION_DEFAULT_NOTES, precedingContext, sermonCache);
   } catch {
     deps.session.sermonCache = null;
     try {
-      return await translateSegment(deps.geminiClient, english, activeLanguages, precedingContext, null);
+      return await translateSegment(deps.geminiClient, 'gemini-3.1-flash-lite', english, activeLanguages, TRANSLATION_DEFAULT_NOTES, precedingContext, null);
     } catch (secondError) {
       void logEvent('error', {
         event: 'translation_failed',
@@ -365,10 +370,10 @@ async function verifyTranscriptionWithRetry(
   sermonCache: SermonCacheRef | null
 ): Promise<TranscriptionCheckResult> {
   try {
-    return await verifyTranscription(client, english, precedingContext, sermonCache);
+    return await verifyTranscription(client, 'gemini-3.1-flash-lite', english, TRANSCRIPTION_VERIFIER_DEFAULT_NOTES, precedingContext, sermonCache);
   } catch {
     try {
-      return await verifyTranscription(client, english, precedingContext, null);
+      return await verifyTranscription(client, 'gemini-3.1-flash-lite', english, TRANSCRIPTION_VERIFIER_DEFAULT_NOTES, precedingContext, null);
     } catch (secondError) {
       void logEvent('error', {
         event: 'transcription_verification_failed',
@@ -387,10 +392,10 @@ async function verifyTranslationsWithRetry(
 ): Promise<Record<string, VerificationResult>> {
   if (items.length === 0) return {};
   try {
-    return await verifyTranslations(client, items, sermonCache);
+    return await verifyTranslations(client, 'gemini-3.1-flash-lite', items, TRANSLATION_VERIFIER_DEFAULT_NOTES, sermonCache);
   } catch {
     try {
-      return await verifyTranslations(client, items, null);
+      return await verifyTranslations(client, 'gemini-3.1-flash-lite', items, TRANSLATION_VERIFIER_DEFAULT_NOTES, null);
     } catch (secondError) {
       void logEvent('error', {
         event: 'verification_failed',
@@ -424,8 +429,10 @@ async function ensureBacklogCached(
     try {
       translations = await translateBacklog(
         deps.geminiClient,
+        'gemini-3.1-flash-lite',
         missingEntries.map((line) => line.english),
-        language
+        language,
+        TRANSLATION_DEFAULT_NOTES
       );
     } catch (error) {
       void logEvent('error', {
