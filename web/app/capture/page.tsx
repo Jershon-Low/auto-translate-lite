@@ -12,6 +12,8 @@ type TranscriptLine = {
   text: string;
   flagged: boolean;
   reason?: string;
+  pending?: boolean;
+  dismissed?: boolean;
   reinstateState?: 'editing' | 'pending' | 'error';
   editedText?: string;
   reinstateError?: string;
@@ -53,6 +55,22 @@ export default function CapturePage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const [isFollowing, setIsFollowing] = useState(true);
+
+  const [mode, setModeState] = useState<'automatic' | 'manual'>('automatic');
+  const modeRef = useRef<'automatic' | 'manual'>('automatic');
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  function setMode(newMode: 'automatic' | 'manual') {
+    setModeState(newMode);
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'set-mode', mode: newMode }));
+    }
+  }
+
+  const pendingQueue = transcriptLines.filter((line) => line.pending && !line.dismissed);
 
   useEffect(() => {
     fetch(`${API_URL}/feedback`)
@@ -230,6 +248,7 @@ export default function CapturePage() {
             text: message.english,
             flagged: Boolean(message.flagged),
             reason: message.reason,
+            pending: Boolean(message.pending),
           };
           if (index === -1) return [...previous.slice(-49), updated];
           const next = [...previous];
@@ -256,6 +275,7 @@ export default function CapturePage() {
 
     socket.onopen = () => {
       socket.send(JSON.stringify({ type: 'start' }));
+      socket.send(JSON.stringify({ type: 'set-mode', mode: modeRef.current }));
       void ensureRecorderStreaming(socket);
     };
 
@@ -314,8 +334,10 @@ export default function CapturePage() {
     if (!line) return;
     const editedText = (line.editedText ?? line.text).trim();
     if (editedText.length === 0) return;
-    const confirmed = window.confirm(`Flagged: "${line.reason ?? 'no reason given'}". Send this line to viewers?`);
-    if (!confirmed) return;
+    if (!line.pending) {
+      const confirmed = window.confirm(`Flagged: "${line.reason ?? 'no reason given'}". Send this line to viewers?`);
+      if (!confirmed) return;
+    }
     setTranscriptLines((previous) =>
       previous.map((entry) => (entry.id === id ? { ...entry, reinstateState: 'pending' } : entry))
     );
@@ -330,6 +352,12 @@ export default function CapturePage() {
       previous.map((entry) => (entry.id === id ? { ...entry, removeState: 'pending' } : entry))
     );
     socketRef.current?.send(JSON.stringify({ type: 'admin-remove', id }));
+  }
+
+  function rejectLine(id: string) {
+    setTranscriptLines((previous) =>
+      previous.map((entry) => (entry.id === id ? { ...entry, dismissed: true } : entry))
+    );
   }
 
   return (
@@ -366,11 +394,89 @@ export default function CapturePage() {
           Stop
         </button>
       </div>
+      <div className="flex items-center gap-3 text-sm">
+        <span className="font-medium">Mode:</span>
+        <button
+          onClick={() => setMode('automatic')}
+          className={mode === 'automatic' ? 'underline font-semibold' : 'text-muted-foreground'}
+        >
+          Automatic
+        </button>
+        <button
+          onClick={() => setMode('manual')}
+          className={mode === 'manual' ? 'underline font-semibold' : 'text-muted-foreground'}
+        >
+          Manual
+        </button>
+        {mode === 'manual' && <span className="text-muted-foreground">{pendingQueue.length} pending</span>}
+      </div>
       <p className="text-sm text-muted-foreground">Status: {status}</p>
       <p className="text-sm text-muted-foreground">
         Session: ${sessionCostUsd.toFixed(4)} · Lifetime: ${lifetimeCostUsd.toFixed(2)}
       </p>
       {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
+      {mode === 'manual' && (
+        <div className="w-full max-w-xl flex flex-col gap-2">
+          <label className="text-sm font-medium">Pending approval ({pendingQueue.length})</label>
+          {pendingQueue.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Nothing waiting.</p>
+          ) : (
+            <div className="border rounded divide-y max-h-64 overflow-y-auto text-sm">
+              {pendingQueue.map((line) => (
+                <div key={line.id} className="p-2 flex flex-col gap-1">
+                  <p>{line.text}</p>
+                  {line.reason && <p className="text-xs text-muted-foreground">{line.reason}</p>}
+                  {line.reinstateState === 'editing' && status === 'recording' ? (
+                    <div className="flex flex-col gap-1">
+                      <textarea
+                        value={line.editedText ?? line.text}
+                        onChange={(event) => updateEditedText(line.id, event.target.value)}
+                        rows={2}
+                        className="w-full border rounded p-1 text-xs"
+                      />
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => sendReinstate(line.id)}
+                          disabled={(line.editedText ?? line.text).trim().length === 0}
+                          className="bg-primary text-primary-foreground px-2 py-1 rounded text-xs disabled:opacity-50"
+                        >
+                          Send
+                        </button>
+                        <button onClick={() => cancelEditing(line.id)} className="text-xs underline">
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => sendReinstate(line.id)}
+                        disabled={status !== 'recording' || line.reinstateState === 'pending'}
+                        className="bg-primary text-primary-foreground px-2 py-1 rounded text-xs disabled:opacity-50"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        onClick={() => beginEditing(line.id, line.text)}
+                        disabled={status !== 'recording' || line.reinstateState === 'pending'}
+                        className="underline text-xs disabled:opacity-50"
+                      >
+                        Edit
+                      </button>
+                      <button onClick={() => rejectLine(line.id)} className="underline text-xs text-destructive">
+                        Reject
+                      </button>
+                    </div>
+                  )}
+                  {line.reinstateState === 'error' && (
+                    <p className="text-xs text-destructive">Couldn&apos;t approve ({line.reinstateError}) — try again.</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       <div className="relative w-full max-w-xl">
         {!isFollowing && (
           <button
