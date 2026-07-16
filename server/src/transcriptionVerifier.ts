@@ -28,6 +28,10 @@ Do NOT flag a line just because it is idiomatic, informal, or grammatically roug
 Language Specific Notes:
 BAHASE INDONESIA: Do NOT flag a line just because it uses the word "Allah" — this is the correct word for God in Indonesian, and is not a misrepresentation of Christian belief.  
 
+Naming Notes:
+CIEL is a cafe in Melbourne, do not remove
+Planetshakers is the church in Melbourne, do not remove
+
 Only mark it unsafe if the line, as transcribed, clearly and confidently misrepresents who God, Jesus, or the Holy Spirit is or does — the kind of thing a dropped or inserted "not" would cause.
 
 ${buildContextBlock(precedingContext)}Line: "${english}"
