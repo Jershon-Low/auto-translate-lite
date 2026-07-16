@@ -103,3 +103,21 @@ Expected: the language picker loads over HTTPS; devtools Network tab shows a `10
 
 ## 8. Generate the QR code for the LED wall
 Point any QR code generator (e.g. `qrencode "https://54-123-45-67.sslip.io" -o qr.png`, or an online generator) at `https://54-123-45-67.sslip.io` and display the result on the LED wall.
+
+## 9. Continuous deployment (GitHub Actions)
+
+Once the instance is set up per Steps 1–7 above, [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) auto-deploys on every push to `master`: it SSHes into the instance, `git reset --hard`s to `origin/master`, rebuilds `server/` and `web/`, then `pm2 restart`s both apps.
+
+One-time setup, in the repo's GitHub Settings → Secrets and variables → Actions:
+
+| Secret | Value |
+|---|---|
+| `EC2_HOST` | The instance's public IP or hostname (e.g. `54.123.45.67` or the sslip.io hostname) |
+| `EC2_USERNAME` | `ubuntu` |
+| `EC2_SSH_KEY` | The **full contents** of the `.pem` private key from Step 1 (`cat /path/to/key.pem`) |
+
+Notes:
+- The workflow assumes the repo is cloned at `~/auto-translate-lite` on the instance (matches the `git clone` command in Step 3). Update the `cd` in the workflow if you used a different path.
+- Because SSH is restricted to **My IP** in the security group (Step 1), GitHub's runners can't reach the instance unless that rule is widened to `0.0.0.0/0` for port 22, or replaced with an IP-allowlist covering [GitHub's Actions runner IP ranges](https://api.github.com/meta) (`actions` key) — those ranges are large and change over time, so most self-hosted setups just open 22 to `0.0.0.0/0` and rely on key-based auth instead.
+- `.env` files are gitignored and untracked, so `git reset --hard` never touches them — no need to re-upload secrets after the first deploy.
+- Trigger a redeploy manually anytime from the repo's **Actions** tab → **Deploy to EC2** → **Run workflow**.

@@ -1,0 +1,42 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH in, pull, build, and restart
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            set -e
+            cd ~/auto-translate-lite
+
+            git fetch --all
+            git reset --hard origin/master
+
+            cd server
+            npm ci
+            npm run build
+
+            cd ../web
+            npm ci
+            npm run build
+
+            cd ..
+            pm2 restart ecosystem.config.js --update-env
+            pm2 save
+
+            curl -fsS http://localhost:3001/health
