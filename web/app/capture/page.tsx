@@ -72,6 +72,68 @@ export default function CapturePage() {
 
   const pendingQueue = transcriptLines.filter((line) => line.pending && !line.dismissed);
 
+  const [approveKey, setApproveKey] = useState('Enter');
+  const [rejectKey, setRejectKey] = useState(' ');
+  const [rebindingAction, setRebindingAction] = useState<'approve' | 'reject' | null>(null);
+  const [rebindError, setRebindError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const storedApprove = window.localStorage.getItem('captureApproveKey');
+    const storedReject = window.localStorage.getItem('captureRejectKey');
+    if (storedApprove) setApproveKey(storedApprove);
+    if (storedReject) setRejectKey(storedReject);
+  }, []);
+
+  function displayKey(key: string): string {
+    return key === ' ' ? 'Space' : key;
+  }
+
+  useEffect(() => {
+    if (!rebindingAction) return;
+    function onKeyDown(event: KeyboardEvent) {
+      event.preventDefault();
+      const key = event.key;
+      const otherKey = rebindingAction === 'approve' ? rejectKey : approveKey;
+      if (key === otherKey) {
+        setRebindError("Approve and Reject can't share a key.");
+        return;
+      }
+      if (rebindingAction === 'approve') {
+        setApproveKey(key);
+        window.localStorage.setItem('captureApproveKey', key);
+      } else {
+        setRejectKey(key);
+        window.localStorage.setItem('captureRejectKey', key);
+      }
+      setRebindError(null);
+      setRebindingAction(null);
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [rebindingAction, approveKey, rejectKey]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (rebindingAction) return;
+      const target = event.target as HTMLElement | null;
+      const isEditable = Boolean(
+        target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      );
+      if (isEditable) return;
+      const oldest = pendingQueue[0];
+      if (!oldest) return;
+      if (event.key === approveKey) {
+        event.preventDefault();
+        sendReinstate(oldest.id);
+      } else if (event.key === rejectKey) {
+        event.preventDefault();
+        rejectLine(oldest.id);
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [pendingQueue, approveKey, rejectKey, rebindingAction]);
+
   useEffect(() => {
     fetch(`${API_URL}/feedback`)
       .then((response) => response.json())
@@ -410,6 +472,28 @@ export default function CapturePage() {
         </button>
         {mode === 'manual' && <span className="text-muted-foreground">{pendingQueue.length} pending</span>}
       </div>
+      <div className="flex items-center gap-3 text-sm">
+        <span className="font-medium">Shortcuts:</span>
+        <button
+          onClick={() => {
+            setRebindError(null);
+            setRebindingAction('approve');
+          }}
+          className="underline"
+        >
+          Approve: {rebindingAction === 'approve' ? 'press a key…' : displayKey(approveKey)}
+        </button>
+        <button
+          onClick={() => {
+            setRebindError(null);
+            setRebindingAction('reject');
+          }}
+          className="underline"
+        >
+          Reject: {rebindingAction === 'reject' ? 'press a key…' : displayKey(rejectKey)}
+        </button>
+        {rebindError && <span className="text-destructive text-xs">{rebindError}</span>}
+      </div>
       <p className="text-sm text-muted-foreground">Status: {status}</p>
       <p className="text-sm text-muted-foreground">
         Session: ${sessionCostUsd.toFixed(4)} · Lifetime: ${lifetimeCostUsd.toFixed(2)}
@@ -422,8 +506,8 @@ export default function CapturePage() {
             <p className="text-sm text-muted-foreground">Nothing waiting.</p>
           ) : (
             <div className="border rounded divide-y max-h-64 overflow-y-auto text-sm">
-              {pendingQueue.map((line) => (
-                <div key={line.id} className="p-2 flex flex-col gap-1">
+              {pendingQueue.map((line, index) => (
+                <div key={line.id} className={`p-2 flex flex-col gap-1 ${index === 0 ? 'bg-accent/30' : ''}`}>
                   <p>{line.text}</p>
                   {line.reason && <p className="text-xs text-muted-foreground">{line.reason}</p>}
                   {line.reinstateState === 'editing' && status === 'recording' ? (
@@ -454,7 +538,7 @@ export default function CapturePage() {
                         disabled={status !== 'recording' || line.reinstateState === 'pending'}
                         className="bg-primary text-primary-foreground px-2 py-1 rounded text-xs disabled:opacity-50"
                       >
-                        Approve
+                        {index === 0 ? `Approve (${displayKey(approveKey)})` : 'Approve'}
                       </button>
                       <button
                         onClick={() => beginEditing(line.id, line.text)}
@@ -464,7 +548,7 @@ export default function CapturePage() {
                         Edit
                       </button>
                       <button onClick={() => rejectLine(line.id)} className="underline text-xs text-destructive">
-                        Reject
+                        {index === 0 ? `Reject (${displayKey(rejectKey)})` : 'Reject'}
                       </button>
                     </div>
                   )}
