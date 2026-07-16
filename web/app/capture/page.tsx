@@ -114,6 +114,7 @@ export default function CapturePage() {
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      if (mode !== 'manual') return;
       if (rebindingAction) return;
       const target = event.target as HTMLElement | null;
       const isEditable = Boolean(
@@ -132,7 +133,7 @@ export default function CapturePage() {
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [pendingQueue, approveKey, rejectKey, rebindingAction]);
+  }, [pendingQueue, approveKey, rejectKey, rebindingAction, mode]);
 
   useEffect(() => {
     fetch(`${API_URL}/feedback`)
