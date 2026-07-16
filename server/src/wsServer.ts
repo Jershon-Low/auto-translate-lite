@@ -2,20 +2,18 @@ import type { IncomingMessage, Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Session } from './session.js';
 import type { CaptionLine } from './types.js';
-import { translateSegment, translateBacklog, type GeminiClient, type SermonCacheRef } from './gemini.js';
-import { verifyTranslations, type VerificationItem, type VerificationResult } from './translationVerifier.js';
-import { verifyTranscription, type TranscriptionCheckResult } from './transcriptionVerifier.js';
+import type { GeminiClient } from './gemini.js';
+import type { VerificationItem, VerificationResult } from './translationVerifier.js';
+import type { TranscriptionCheckResult } from './transcriptionVerifier.js';
 import type { DeepgramConnection, DeepgramConnectionFactory } from './deepgram.js';
-import { createSermonContextCache, deleteSermonContextCache, buildSermonContextInstruction } from './sermonCache.js';
+import { createRoleCaches, deleteRoleCaches } from './sermonCache.js';
+import { getProvider } from './llmRegistry.js';
 import type { SermonDocStore } from './sermonDocStore.js';
 import type { FeedbackStore } from './feedbackStore.js';
 import type { CostTracker } from './costTracker.js';
+import type { ModelConfigStore } from './modelConfigStore.js';
+import type { PromptConfigStore } from './promptConfigStore.js';
 import { logEvent } from './logger.js';
-import {
-  TRANSLATION_DEFAULT_NOTES,
-  TRANSCRIPTION_VERIFIER_DEFAULT_NOTES,
-  TRANSLATION_VERIFIER_DEFAULT_NOTES,
-} from './llmPrompts.js';
 
 const PRECEDING_CONTEXT_LINES = 7;
 
@@ -28,6 +26,8 @@ export interface WsServerDeps {
   sermonDocStore: SermonDocStore;
   feedbackStore: FeedbackStore;
   costTracker: CostTracker;
+  modelConfigStore: ModelConfigStore;
+  promptConfigStore: PromptConfigStore;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
@@ -75,21 +75,26 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
           if (message.type === 'start') {
             deps.session.start();
 
-            const sermonText = deps.sermonDocStore.get();
+            const sermonText = deps.sermonDocStore.get() ?? '';
             const feedbackText = await deps.feedbackStore.read();
-            if (sermonText) {
-              deps.session.sermonCache = await createSermonContextCache(
-                deps.geminiClient,
-                feedbackText,
-                sermonText
-              );
-            }
+            const modelConfig = await deps.modelConfigStore.read();
+            const promptConfig = await deps.promptConfigStore.read();
+
+            deps.session.providers = {
+              transcriptionVerifier: getProvider(modelConfig.transcriptionVerifier, promptConfig.transcriptionVerifier, deps.geminiClient),
+              translation: getProvider(modelConfig.translation, promptConfig.translation, deps.geminiClient),
+              translationVerifier: getProvider(modelConfig.translationVerifier, promptConfig.translationVerifier, deps.geminiClient),
+            };
+            deps.session.roleCaches = await createRoleCaches(deps.geminiClient, modelConfig, promptConfig, feedbackText, sermonText);
 
             void logEvent('info', {
               event: 'session_context_cache',
               sessionId: deps.session.id,
-              cacheName: deps.session.sermonCache?.name ?? null,
-              instruction: sermonText ? buildSermonContextInstruction(feedbackText, sermonText) : null,
+              cacheNames: {
+                transcriptionVerifier: deps.session.roleCaches.transcriptionVerifier?.name ?? null,
+                translation: deps.session.roleCaches.translation?.name ?? null,
+                translationVerifier: deps.session.roleCaches.translationVerifier?.name ?? null,
+              },
             });
 
             deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
@@ -118,8 +123,8 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             });
           } else if (message.type === 'stop') {
             deps.session.stop();
-            await deleteSermonContextCache(deps.geminiClient, deps.session.sermonCache);
-            deps.session.sermonCache = null;
+            await deleteRoleCaches(deps.geminiClient, deps.session.roleCaches);
+            deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
             deepgramConnection?.finish();
             deepgramConnection = null;
             ws.send(JSON.stringify({ type: 'status', status: 'idle' }));
@@ -164,8 +169,8 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
 
   ws.on('close', () => {
     deps.session.stop();
-    void deleteSermonContextCache(deps.geminiClient, deps.session.sermonCache).then(() => {
-      deps.session.sermonCache = null;
+    void deleteRoleCaches(deps.geminiClient, deps.session.roleCaches).then(() => {
+      deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
     });
     deepgramConnection?.finish();
 
@@ -201,7 +206,7 @@ async function finishPublishing(
   const verificationItems: VerificationItem[] = activeLanguages
     .filter((language) => Boolean(translations[language]))
     .map((language) => ({ id: language, english: line.english, translated: translations[language] }));
-  const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems, deps.session.sermonCache);
+  const verifications = await verifyTranslationsWithRetry(deps, verificationItems);
 
   for (const language of activeLanguages) {
     const translated = translations[language];
@@ -213,7 +218,7 @@ async function finishPublishing(
     deps.session.translationCache.set(language, line.id, outgoing);
 
     if (!safe) {
-      logTranslationFallback(language, line.english, translated, verification?.reason ?? 'verification unavailable');
+      logTranslationFallback(language, line.english, translated, verification?.reason || 'verification unavailable');
     }
 
     const payload = JSON.stringify({ type: viewerMessageType, id: line.id, english: line.english, translated: outgoing });
@@ -251,15 +256,13 @@ async function handleReinstate(
     const cachedLanguages = activeLanguages.filter((language) => cachedTranslations[language] !== undefined);
     const newLanguages = activeLanguages.filter((language) => cachedTranslations[language] === undefined);
     const freshTranslations =
-      newLanguages.length > 0
-        ? await translateWithFallback(deps, trimmed, newLanguages, precedingContext, deps.session.sermonCache)
-        : {};
+      newLanguages.length > 0 ? await translateWithFallback(deps, trimmed, newLanguages, precedingContext) : {};
     translations = {
       ...Object.fromEntries(cachedLanguages.map((language) => [language, cachedTranslations[language]])),
       ...freshTranslations,
     };
   } else {
-    translations = await translateWithFallback(deps, trimmed, activeLanguages, precedingContext, deps.session.sermonCache);
+    translations = await translateWithFallback(deps, trimmed, activeLanguages, precedingContext);
   }
 
   const line = deps.session.buffer.reinstate(id, trimmed);
@@ -297,12 +300,11 @@ async function handleFinalSegment(
     .filter((recentLine) => !recentLine.suppressed)
     .slice(-PRECEDING_CONTEXT_LINES)
     .map((recentLine) => recentLine.english);
-  const sermonCache = deps.session.sermonCache;
   const activeLanguages = deps.session.getActiveLanguages();
 
   const [transcriptionResult, translations] = await Promise.all([
-    verifyTranscriptionWithRetry(deps.geminiClient, english, precedingContext, sermonCache),
-    translateWithFallback(deps, english, activeLanguages, precedingContext, sermonCache),
+    verifyTranscriptionWithRetry(deps, english, precedingContext),
+    translateWithFallback(deps, english, activeLanguages, precedingContext),
   ]);
 
   const manualHold = deps.session.mode === 'manual';
@@ -342,16 +344,19 @@ async function translateWithFallback(
   deps: WsServerDeps,
   english: string,
   activeLanguages: string[],
-  precedingContext: string[],
-  sermonCache: SermonCacheRef | null
+  precedingContext: string[]
 ): Promise<Record<string, string>> {
   if (activeLanguages.length === 0) return {};
+  // deps.session.providers is populated synchronously in the 'start' handler
+  // before the Deepgram connection (the only source of onFinalSegment calls,
+  // which is what drives this function) is created — see handleCaptureConnection.
+  const provider = deps.session.providers!.translation;
   try {
-    return await translateSegment(deps.geminiClient, 'gemini-3.1-flash-lite', english, activeLanguages, TRANSLATION_DEFAULT_NOTES, precedingContext, sermonCache);
+    return await provider.translate(english, activeLanguages, precedingContext, deps.session.roleCaches.translation);
   } catch {
-    deps.session.sermonCache = null;
+    deps.session.roleCaches.translation = null;
     try {
-      return await translateSegment(deps.geminiClient, 'gemini-3.1-flash-lite', english, activeLanguages, TRANSLATION_DEFAULT_NOTES, precedingContext, null);
+      return await provider.translate(english, activeLanguages, precedingContext, null);
     } catch (secondError) {
       void logEvent('error', {
         event: 'translation_failed',
@@ -364,16 +369,17 @@ async function translateWithFallback(
 }
 
 async function verifyTranscriptionWithRetry(
-  client: GeminiClient,
+  deps: WsServerDeps,
   english: string,
-  precedingContext: string[],
-  sermonCache: SermonCacheRef | null
+  precedingContext: string[]
 ): Promise<TranscriptionCheckResult> {
+  const provider = deps.session.providers!.transcriptionVerifier;
+  const cacheRef = deps.session.roleCaches.transcriptionVerifier;
   try {
-    return await verifyTranscription(client, 'gemini-3.1-flash-lite', english, TRANSCRIPTION_VERIFIER_DEFAULT_NOTES, precedingContext, sermonCache);
+    return await provider.verifyTranscription(english, precedingContext, cacheRef);
   } catch {
     try {
-      return await verifyTranscription(client, 'gemini-3.1-flash-lite', english, TRANSCRIPTION_VERIFIER_DEFAULT_NOTES, precedingContext, null);
+      return await provider.verifyTranscription(english, precedingContext, null);
     } catch (secondError) {
       void logEvent('error', {
         event: 'transcription_verification_failed',
@@ -386,16 +392,17 @@ async function verifyTranscriptionWithRetry(
 }
 
 async function verifyTranslationsWithRetry(
-  client: GeminiClient,
-  items: VerificationItem[],
-  sermonCache: SermonCacheRef | null
+  deps: WsServerDeps,
+  items: VerificationItem[]
 ): Promise<Record<string, VerificationResult>> {
   if (items.length === 0) return {};
+  const provider = deps.session.providers!.translationVerifier;
+  const cacheRef = deps.session.roleCaches.translationVerifier;
   try {
-    return await verifyTranslations(client, 'gemini-3.1-flash-lite', items, TRANSLATION_VERIFIER_DEFAULT_NOTES, sermonCache);
+    return await provider.verifyTranslations(items, cacheRef);
   } catch {
     try {
-      return await verifyTranslations(client, 'gemini-3.1-flash-lite', items, TRANSLATION_VERIFIER_DEFAULT_NOTES, null);
+      return await provider.verifyTranslations(items, null);
     } catch (secondError) {
       void logEvent('error', {
         event: 'verification_failed',
@@ -427,12 +434,10 @@ async function ensureBacklogCached(
   const fillPromise = (async () => {
     let translations: string[];
     try {
-      translations = await translateBacklog(
-        deps.geminiClient,
-        'gemini-3.1-flash-lite',
+      translations = await deps.session.providers!.translation.translateBacklog(
         missingEntries.map((line) => line.english),
         language,
-        TRANSLATION_DEFAULT_NOTES
+        deps.session.roleCaches.translation
       );
     } catch (error) {
       void logEvent('error', {
@@ -449,7 +454,7 @@ async function ensureBacklogCached(
     const verificationItems: VerificationItem[] = missingEntries
       .map((line, index) => ({ id: line.id, english: line.english, translated: translations[index] ?? '' }))
       .filter((item) => item.translated.length > 0);
-    const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems, deps.session.sermonCache);
+    const verifications = await verifyTranslationsWithRetry(deps, verificationItems);
 
     missingEntries.forEach((line, index) => {
       const translated = translations[index];

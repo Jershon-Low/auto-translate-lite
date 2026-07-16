@@ -9,6 +9,8 @@ import { createSermonDocStore } from '../src/sermonDocStore';
 import type { SermonDocStore } from '../src/sermonDocStore';
 import type { FeedbackStore } from '../src/feedbackStore';
 import type { CostTracker } from '../src/costTracker';
+import { DEFAULT_MODEL_CONFIG, type ModelConfigStore } from '../src/modelConfigStore';
+import { DEFAULT_PROMPT_CONFIG, type PromptConfigStore } from '../src/promptConfigStore';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -76,6 +78,14 @@ function fakeCostTracker(): CostTracker & { listeners: Set<(sessionUsd: number, 
   };
 }
 
+function fakeModelConfigStore(): ModelConfigStore {
+  return { read: vi.fn().mockResolvedValue(DEFAULT_MODEL_CONFIG), write: vi.fn().mockResolvedValue(undefined) };
+}
+
+function fakePromptConfigStore(): PromptConfigStore {
+  return { read: vi.fn().mockResolvedValue(DEFAULT_PROMPT_CONFIG), write: vi.fn().mockResolvedValue(undefined) };
+}
+
 function isTranslateCall(call: any): boolean {
   const contents = call[0].contents as string;
   return !contents.includes('safety checker') && !contents.includes('transcription accuracy checker');
@@ -123,6 +133,8 @@ describe('wsServer', () => {
       sermonDocStore,
       feedbackStore,
       costTracker,
+      modelConfigStore: fakeModelConfigStore(),
+      promptConfigStore: fakePromptConfigStore(),
     });
 
     await new Promise<void>((resolve) => httpServer.listen(0, resolve));
@@ -425,8 +437,22 @@ describe('wsServer', () => {
     viewerSocket.close();
   });
 
-  describe('sermon context caching', () => {
-    it('creates a cache on start when a sermon document is pending, and passes it to translation calls', async () => {
+  describe('per-role context caching', () => {
+    it('creates a cache for every role on start, even with no sermon document uploaded, since fixed rules + notes are always cacheable', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      expect(geminiClient.caches.create).toHaveBeenCalledTimes(3);
+      expect(session.roleCaches.transcriptionVerifier).toEqual({ name: 'cachedContents/test' });
+      expect(session.roleCaches.translation).toEqual({ name: 'cachedContents/test' });
+      expect(session.roleCaches.translationVerifier).toEqual({ name: 'cachedContents/test' });
+
+      captureSocket.close();
+    });
+
+    it('passes the translation role\'s cache to translation calls', async () => {
       sermonDocStore.set('This week: the story of Cain and Abel.');
       (feedbackStore.read as ReturnType<typeof vi.fn>).mockResolvedValue(
         'Cain should translate to 该隐 in Chinese'
@@ -436,10 +462,6 @@ describe('wsServer', () => {
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
-
-      expect(geminiClient.caches.create).toHaveBeenCalledTimes(1);
-      expect(session.sermonCache).toEqual({ name: 'cachedContents/test' });
-      expect(sermonDocStore.get()).not.toBeNull();
 
       const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
       await waitForOpen(viewerSocket);
@@ -457,24 +479,7 @@ describe('wsServer', () => {
       viewerSocket.close();
     });
 
-    it('does not create a cache when no sermon document was uploaded', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
-      await waitForOpen(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'start' }));
-      await waitForMessage(captureSocket);
-
-      expect(geminiClient.caches.create).not.toHaveBeenCalled();
-      expect(session.sermonCache).toBeNull();
-
-      captureSocket.close();
-    });
-
-    it('deletes the cache on stop', async () => {
-      sermonDocStore.set(
-        'This week: the story of Cain and Abel. Genesis chapter four covers jealousy, ' +
-          "the first murder, and God's response to Cain after he kills his brother out in the field."
-      );
-
+    it('deletes every role\'s cache on stop', async () => {
       const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
@@ -483,52 +488,40 @@ describe('wsServer', () => {
       captureSocket.send(JSON.stringify({ type: 'stop' }));
       await waitForMessage(captureSocket); // status: idle
 
-      expect(geminiClient.caches.delete).toHaveBeenCalledWith({ name: 'cachedContents/test' });
-      expect(session.sermonCache).toBeNull();
+      expect(geminiClient.caches.delete).toHaveBeenCalledTimes(3);
+      expect(session.roleCaches).toEqual({ transcriptionVerifier: null, translation: null, translationVerifier: null });
 
       captureSocket.close();
     });
 
-    it('rebuilds the cache on a second start (reconnect) since the sermon doc is no longer consumed', async () => {
-      sermonDocStore.set(
-        'This week: the story of Cain and Abel. Genesis chapter four covers jealousy, ' +
-          "the first murder, and God's response to Cain after he kills his brother out in the field."
-      );
-
+    it('rebuilds all three caches on a second start (reconnect)', async () => {
       const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
       await waitForOpen(captureSocket);
 
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
-      expect(geminiClient.caches.create).toHaveBeenCalledTimes(1);
-      expect(sermonDocStore.get()).not.toBeNull();
+      expect(geminiClient.caches.create).toHaveBeenCalledTimes(3);
 
       // Simulate a client auto-reconnect: it re-sends 'start' on the same
       // logical flow without a new document upload.
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      expect(geminiClient.caches.create).toHaveBeenCalledTimes(2);
-      expect(session.sermonCache).toEqual({ name: 'cachedContents/test' });
+      expect(geminiClient.caches.create).toHaveBeenCalledTimes(6);
 
       captureSocket.close();
     });
 
-    it('drops the stale cache reference on translation retry and self-heals subsequent segments', async () => {
-      sermonDocStore.set(
-        'This week: the story of Cain and Abel. Genesis chapter four covers jealousy, ' +
-          "the first murder, and God's response to Cain after he kills his brother out in the field."
-      );
-
+    it('drops the stale translation cache reference on translation retry and self-heals subsequent segments', async () => {
       let translateCallCount = 0;
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
         if (params.contents.includes('transcription accuracy checker')) {
-          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+          return Promise.resolve({ text: '{"safe":true,"reason":""}' });
         }
         if (params.contents.includes('safety checker')) {
           const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
           const result: Record<string, { safe: boolean; reason: string }> = {};
-          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          for (const id of ids) result[id] = { safe: true, reason: '' };
           return Promise.resolve({ text: JSON.stringify(result) });
         }
         translateCallCount += 1;
@@ -543,7 +536,7 @@ describe('wsServer', () => {
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      expect(session.sermonCache).toEqual({ name: 'cachedContents/test' });
+      expect(session.roleCaches.translation).toEqual({ name: 'cachedContents/test' });
 
       const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
       await waitForOpen(viewerSocket);
@@ -561,9 +554,11 @@ describe('wsServer', () => {
       expect(translateCalls[0][0].config.cachedContent).toBe('cachedContents/test');
       expect(translateCalls[1][0].config).not.toHaveProperty('cachedContent');
 
-      // Cross-segment self-healing: the session's cache reference was cleared,
-      // so a later segment must not even attempt to use it.
-      expect(session.sermonCache).toBeNull();
+      // Cross-segment self-healing: only the translation role's cache was
+      // cleared, so a later segment must not even attempt to use it, while
+      // the other two roles' caches are untouched.
+      expect(session.roleCaches.translation).toBeNull();
+      expect(session.roleCaches.transcriptionVerifier).toEqual({ name: 'cachedContents/test' });
 
       const captionPromise2 = waitForMessage(viewerSocket);
       capturedCallbacks!.onFinalSegment('A later segment');
@@ -577,16 +572,11 @@ describe('wsServer', () => {
       viewerSocket.close();
     });
 
-    it('drops the stale cache reference on verification retry', async () => {
-      sermonDocStore.set(
-        'This week: the story of Cain and Abel. Genesis chapter four covers jealousy, ' +
-          "the first murder, and God's response to Cain after he kills his brother out in the field."
-      );
-
+    it('retries a failed verification without persisting the null cache reference back onto the session', async () => {
       let verifyCallCount = 0;
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
         if (params.contents.includes('transcription accuracy checker')) {
-          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+          return Promise.resolve({ text: '{"safe":true,"reason":""}' });
         }
         if (params.contents.includes('safety checker')) {
           verifyCallCount += 1;
@@ -595,7 +585,7 @@ describe('wsServer', () => {
           }
           const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
           const result: Record<string, { safe: boolean; reason: string }> = {};
-          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          for (const id of ids) result[id] = { safe: true, reason: '' };
           return Promise.resolve({ text: JSON.stringify(result) });
         }
         return Promise.resolve({ text: '{"zh":"你好"}' });
@@ -624,6 +614,9 @@ describe('wsServer', () => {
       expect(verifyCalls).toHaveLength(2);
       expect(verifyCalls[0][0].config.cachedContent).toBe('cachedContents/test');
       expect(verifyCalls[1][0].config).not.toHaveProperty('cachedContent');
+      // Unlike translation, a failed verification retry does not persist the
+      // null cache reference back onto the session (matches pre-existing behavior).
+      expect(session.roleCaches.translationVerifier).toEqual({ name: 'cachedContents/test' });
 
       captureSocket.close();
       viewerSocket.close();

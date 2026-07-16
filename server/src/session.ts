@@ -2,13 +2,21 @@ import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import { TranscriptBuffer } from './transcriptBuffer.js';
 import { TranslationCache } from './translationCache.js';
-import type { SermonCacheRef } from './gemini.js';
+import type { RoleCaches } from './sermonCache.js';
+import type { RoleProviders } from './llmTypes.js';
+
+const EMPTY_ROLE_CACHES: RoleCaches = {
+  transcriptionVerifier: null,
+  translation: null,
+  translationVerifier: null,
+};
 
 export class Session {
   id: string = randomUUID();
   isActive: boolean = false;
   buffer: TranscriptBuffer = new TranscriptBuffer();
-  sermonCache: SermonCacheRef | null = null;
+  roleCaches: RoleCaches = { ...EMPTY_ROLE_CACHES };
+  providers: RoleProviders | null = null;
   translationCache: TranslationCache = new TranslationCache();
   inFlightFills: Map<string, Promise<void>> = new Map();
   mode: 'automatic' | 'manual' = 'automatic';
@@ -18,7 +26,8 @@ export class Session {
     this.id = randomUUID();
     this.isActive = true;
     this.buffer.clear();
-    this.sermonCache = null;
+    this.roleCaches = { ...EMPTY_ROLE_CACHES };
+    this.providers = null;
     this.translationCache = new TranslationCache();
     this.inFlightFills = new Map();
   }

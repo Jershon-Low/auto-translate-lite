@@ -66,11 +66,20 @@ describe('Session', () => {
     expect(session.buffer.getRecent(0)).toHaveLength(1);
   });
 
-  it('start() clears any previous sermon cache reference', () => {
+  it('start() clears any previous role caches and providers', () => {
     const session = new Session();
-    session.sermonCache = { name: 'cachedContents/old' };
+    session.roleCaches = {
+      transcriptionVerifier: { name: 'cachedContents/old-tv' },
+      translation: { name: 'cachedContents/old-t' },
+      translationVerifier: { name: 'cachedContents/old-vv' },
+    };
     session.start();
-    expect(session.sermonCache).toBeNull();
+    expect(session.roleCaches).toEqual({
+      transcriptionVerifier: null,
+      translation: null,
+      translationVerifier: null,
+    });
+    expect(session.providers).toBeNull();
   });
 
   it('start() replaces the translation cache, discarding anything cached in the previous session', () => {
