@@ -359,6 +359,73 @@ async function verifyTranslationsWithRetry(
   }
 }
 
+async function ensureBacklogCached(
+  deps: WsServerDeps,
+  language: string,
+  missingEntries: CaptionLine[]
+): Promise<void> {
+  if (missingEntries.length === 0) return;
+
+  const cache = deps.session.translationCache;
+  const fills = deps.session.inFlightFills;
+
+  const existingFill = fills.get(language);
+  if (existingFill) {
+    await existingFill;
+    const stillMissing = missingEntries.filter((line) => cache.get(language, line.id) === undefined);
+    if (stillMissing.length === 0) return;
+    return ensureBacklogCached(deps, language, stillMissing);
+  }
+
+  const fillPromise = (async () => {
+    let translations: string[];
+    try {
+      translations = await translateBacklog(
+        deps.geminiClient,
+        missingEntries.map((line) => line.english),
+        language
+      );
+    } catch (error) {
+      void logEvent('error', {
+        event: 'backlog_translation_failed',
+        language,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      for (const line of missingEntries) {
+        cache.set(language, line.id, line.english);
+      }
+      return;
+    }
+
+    const verificationItems: VerificationItem[] = missingEntries
+      .map((line, index) => ({ id: line.id, english: line.english, translated: translations[index] ?? '' }))
+      .filter((item) => item.translated.length > 0);
+    const verifications = await verifyTranslationsWithRetry(deps.geminiClient, verificationItems, deps.session.sermonCache);
+
+    missingEntries.forEach((line, index) => {
+      const translated = translations[index];
+      if (!translated) {
+        cache.set(language, line.id, line.english);
+        return;
+      }
+      const verification = verifications[line.id];
+      if (verification?.safe === true) {
+        cache.set(language, line.id, translated);
+        return;
+      }
+      logTranslationFallback(language, line.english, translated, verification?.reason ?? 'verification unavailable');
+      cache.set(language, line.id, line.english);
+    });
+  })();
+
+  fills.set(language, fillPromise);
+  try {
+    await fillPromise;
+  } finally {
+    fills.delete(language);
+  }
+}
+
 function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
   ws.on('message', (data) => {
     void (async () => {
@@ -366,56 +433,20 @@ function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
         const message = JSON.parse(data.toString());
         if (message.type === 'subscribe') {
           const language = message.language as string;
+          const cache = deps.session.translationCache;
 
           const backlog = deps.session.buffer.getRecent();
-          if (backlog.length === 0) {
-            ws.send(JSON.stringify({ type: 'backlog', lines: [] }));
-            deps.session.addViewer(ws, language);
-            return;
-          }
-
           const visibleEntries = backlog.filter((line) => !line.suppressed);
-          const translations = await translateBacklog(
-            deps.geminiClient,
-            visibleEntries.map((line) => line.english),
-            language
-          );
-          const visibleLines = visibleEntries.map((line, index) => ({
-            id: line.id,
-            english: line.english,
-            translated: translations[index] ?? '',
-          }));
+          const missingEntries = visibleEntries.filter((line) => cache.get(language, line.id) === undefined);
 
-          const verificationItems: VerificationItem[] = visibleLines
-            .filter((line) => line.translated.length > 0)
-            .map((line) => ({ id: line.id, english: line.english, translated: line.translated }));
-          const verifications = await verifyTranslationsWithRetry(
-            deps.geminiClient,
-            verificationItems,
-            deps.session.sermonCache
-          );
-
-          const verifiedById = new Map(
-            visibleLines.map((line) => {
-              if (line.translated.length === 0) {
-                return [line.id, { id: line.id, english: line.english, translated: line.english }] as const;
-              }
-              const verification = verifications[line.id];
-              if (verification?.safe === true) return [line.id, line] as const;
-              logTranslationFallback(
-                language,
-                line.english,
-                line.translated,
-                verification?.reason ?? 'verification unavailable'
-              );
-              return [line.id, { id: line.id, english: line.english, translated: line.english }] as const;
-            })
-          );
+          if (missingEntries.length > 0) {
+            await ensureBacklogCached(deps, language, missingEntries);
+          }
 
           const lines = backlog.map((line) =>
             line.suppressed
               ? { id: line.id, english: '', translated: '', removed: true }
-              : verifiedById.get(line.id)!
+              : { id: line.id, english: line.english, translated: cache.get(language, line.id) ?? line.english }
           );
 
           ws.send(JSON.stringify({ type: 'backlog', lines }));

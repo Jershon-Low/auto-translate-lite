@@ -1045,6 +1045,156 @@ describe('wsServer', () => {
       captureSocket.close();
       viewerSocket.close();
     });
+
+    it('serves a second subscriber to an already-active language from cache, without additional Gemini calls', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const firstViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(firstViewer);
+      firstViewer.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(firstViewer); // backlog: []
+
+      const captionPromise = waitForMessage(firstViewer);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await captionPromise;
+
+      const callsBeforeSecondSubscribe = (geminiClient.models.generateContent as any).mock.calls.length;
+
+      const secondViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(secondViewer);
+      secondViewer.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      const backlogMessage = await waitForMessage(secondViewer);
+
+      expect(backlogMessage).toEqual({
+        type: 'backlog',
+        lines: [{ id: expect.any(String), english: 'Hello everyone', translated: '你好' }],
+      });
+      expect((geminiClient.models.generateContent as any).mock.calls.length).toBe(callsBeforeSecondSubscribe);
+
+      captureSocket.close();
+      firstViewer.close();
+      secondViewer.close();
+    });
+
+    it('coalesces two concurrent first-time subscribes to the same new language into one backlog fill', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      session.buffer.append('Earlier line', Date.now());
+
+      let resolveTranslate!: (value: { text: string }) => void;
+      const pendingTranslate = new Promise<{ text: string }>((resolve) => {
+        resolveTranslate = resolve;
+      });
+      let notifyTranslateStarted!: () => void;
+      const translateStarted = new Promise<void>((resolve) => {
+        notifyTranslateStarted = resolve;
+      });
+      let translateCallCount = 0;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('safety checker')) {
+          // Mirror fakeGeminiClient's default behavior (see top of this file):
+          // mark every requested id safe, so this test isolates coalescing
+          // behavior instead of accidentally exercising the unsafe-fallback path.
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        translateCallCount += 1;
+        notifyTranslateStarted();
+        return pendingTranslate;
+      });
+
+      const firstViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(firstViewer);
+      firstViewer.send(JSON.stringify({ type: 'subscribe', language: 'fr' }));
+      await translateStarted;
+
+      const secondViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(secondViewer);
+      secondViewer.send(JSON.stringify({ type: 'subscribe', language: 'fr' }));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(translateCallCount).toBe(1);
+
+      const firstBacklogPromise = waitForMessage(firstViewer);
+      const secondBacklogPromise = waitForMessage(secondViewer);
+      resolveTranslate({ text: '{"translations":["Plus tôt"]}' });
+
+      const [firstBacklog, secondBacklog] = await Promise.all([firstBacklogPromise, secondBacklogPromise]);
+      expect(firstBacklog).toEqual({
+        type: 'backlog',
+        lines: [{ id: expect.any(String), english: 'Earlier line', translated: 'Plus tôt' }],
+      });
+      expect(secondBacklog).toEqual(firstBacklog);
+      expect(translateCallCount).toBe(1);
+
+      captureSocket.close();
+      firstViewer.close();
+      secondViewer.close();
+    });
+
+    it('a viewer subscribing after a reinstated correction sees the cached corrected translation, with no extra Gemini calls', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const firstViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(firstViewer);
+      firstViewer.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(firstViewer); // backlog: []
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":false,"reason":"likely mis-heard negation"}' });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
+      const flagged = await transcriptPromise;
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: '{"zh":{"safe":true,"reason":"ok"}}' });
+        }
+        return Promise.resolve({ text: '{"zh":"耶稣确实是神的儿子"}' });
+      });
+
+      const ackPromise = waitForMessage(captureSocket);
+      const insertedPromise = waitForMessage(firstViewer);
+      captureSocket.send(
+        JSON.stringify({ type: 'reinstate', id: flagged.id, english: 'Jesus is indeed the son of God' })
+      );
+      await ackPromise;
+      await insertedPromise;
+
+      expect(session.translationCache.get('zh', flagged.id)).toBe('耶稣确实是神的儿子');
+
+      const callsBeforeSecondSubscribe = (geminiClient.models.generateContent as any).mock.calls.length;
+
+      const secondViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(secondViewer);
+      secondViewer.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      const backlogMessage = await waitForMessage(secondViewer);
+
+      expect(backlogMessage).toEqual({
+        type: 'backlog',
+        lines: [{ id: flagged.id, english: 'Jesus is indeed the son of God', translated: '耶稣确实是神的儿子' }],
+      });
+      expect((geminiClient.models.generateContent as any).mock.calls.length).toBe(callsBeforeSecondSubscribe);
+
+      captureSocket.close();
+      firstViewer.close();
+      secondViewer.close();
+    });
   });
 
   describe('admin-remove', () => {
