@@ -7,6 +7,8 @@ import { createSermonDocStore } from '../src/sermonDocStore';
 import { createFeedbackStore } from '../src/feedbackStore';
 import { createViewerFeedbackStore } from '../src/viewerFeedbackStore';
 import { Session } from '../src/session';
+import { createModelConfigStore, DEFAULT_MODEL_CONFIG } from '../src/modelConfigStore';
+import { createPromptConfigStore, DEFAULT_PROMPT_CONFIG } from '../src/promptConfigStore';
 
 vi.mock('../src/docExtraction', () => ({
   extractDocumentText: vi.fn().mockResolvedValue('Extracted sermon text'),
@@ -22,6 +24,9 @@ function testDeps() {
       join(tmpdir(), `viewer-feedback-app-test-${Date.now()}-${Math.random()}.json`)
     ),
     session: new Session(),
+    modelConfigStore: createModelConfigStore(join(tmpdir(), `model-config-app-test-${Date.now()}-${Math.random()}.json`)),
+    promptConfigStore: createPromptConfigStore(join(tmpdir(), `prompt-config-app-test-${Date.now()}-${Math.random()}.json`)),
+    adminPasscode: 'test-passcode',
   };
 }
 
@@ -221,5 +226,94 @@ describe('POST /viewer-feedback/download-all', () => {
     expect(response.text).toContain('Beta line');
     expect(response.text).not.toContain('Alpha line');
     expect(deps.viewerFeedbackStore.list().every((item) => item.downloaded)).toBe(true);
+  });
+});
+
+describe('GET/PUT /admin/model-config', () => {
+  it('returns 401 without the admin passcode header', async () => {
+    const response = await request(createApp(testDeps())).get('/admin/model-config');
+    expect(response.status).toBe(401);
+  });
+
+  it('returns the default config on first read', async () => {
+    const response = await request(createApp(testDeps()))
+      .get('/admin/model-config')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(DEFAULT_MODEL_CONFIG);
+  });
+
+  it('saves a valid config and returns it on a subsequent read', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+    const newConfig = {
+      transcriptionVerifier: 'gemini-3.1-flash-lite',
+      translation: 'gemini-3.5-flash',
+      translationVerifier: 'gemini-3.1-flash-lite',
+    };
+
+    const putResponse = await request(app)
+      .put('/admin/model-config')
+      .set('x-admin-passcode', 'test-passcode')
+      .send(newConfig);
+    expect(putResponse.status).toBe(200);
+
+    const getResponse = await request(app).get('/admin/model-config').set('x-admin-passcode', 'test-passcode');
+    expect(getResponse.body).toEqual(newConfig);
+  });
+
+  it('rejects an invalid model id with 400 and does not persist it', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+
+    const putResponse = await request(app)
+      .put('/admin/model-config')
+      .set('x-admin-passcode', 'test-passcode')
+      .send({ transcriptionVerifier: 'gpt-5', translation: 'gemini-3.5-flash', translationVerifier: 'gemini-3.1-flash-lite' });
+    expect(putResponse.status).toBe(400);
+
+    const getResponse = await request(app).get('/admin/model-config').set('x-admin-passcode', 'test-passcode');
+    expect(getResponse.body).toEqual(DEFAULT_MODEL_CONFIG);
+  });
+});
+
+describe('GET/PUT /admin/prompt-config', () => {
+  it('returns 401 without the admin passcode header', async () => {
+    const response = await request(createApp(testDeps())).get('/admin/prompt-config');
+    expect(response.status).toBe(401);
+  });
+
+  it('returns the default notes and the fixed rules for reference on first read', async () => {
+    const response = await request(createApp(testDeps()))
+      .get('/admin/prompt-config')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(200);
+    expect(response.body.notes).toEqual(DEFAULT_PROMPT_CONFIG);
+    expect(typeof response.body.fixedRules.transcriptionVerifier).toBe('string');
+    expect(typeof response.body.fixedRules.translation).toBe('string');
+    expect(typeof response.body.fixedRules.translationVerifier).toBe('string');
+  });
+
+  it('saves valid notes and returns them on a subsequent read', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+    const newNotes = { transcriptionVerifier: 'a', translation: 'b', translationVerifier: 'c' };
+
+    const putResponse = await request(app)
+      .put('/admin/prompt-config')
+      .set('x-admin-passcode', 'test-passcode')
+      .send(newNotes);
+    expect(putResponse.status).toBe(200);
+
+    const getResponse = await request(app).get('/admin/prompt-config').set('x-admin-passcode', 'test-passcode');
+    expect(getResponse.body.notes).toEqual(newNotes);
+  });
+
+  it('rejects a payload missing a role with 400', async () => {
+    const response = await request(createApp(testDeps()))
+      .put('/admin/prompt-config')
+      .set('x-admin-passcode', 'test-passcode')
+      .send({ transcriptionVerifier: 'a', translation: 'b' });
+    expect(response.status).toBe(400);
   });
 });

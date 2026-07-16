@@ -7,12 +7,25 @@ import type { SermonDocStore } from './sermonDocStore.js';
 import type { FeedbackStore } from './feedbackStore.js';
 import type { ViewerFeedbackStore } from './viewerFeedbackStore.js';
 import type { Session } from './session.js';
+import { createAdminAuth } from './adminAuth.js';
+import { validateModelConfig, type ModelConfigStore } from './modelConfigStore.js';
+import { validatePromptConfig, type PromptConfigStore } from './promptConfigStore.js';
+import {
+  TRANSLATION_FIXED_RULES,
+  TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO,
+  TRANSCRIPTION_VERIFIER_FIXED_RULES_OUTRO,
+  TRANSLATION_VERIFIER_FIXED_RULES_INTRO,
+  TRANSLATION_VERIFIER_FIXED_RULES_OUTRO,
+} from './llmPrompts.js';
 
 export interface AppDeps {
   sermonDocStore: SermonDocStore;
   feedbackStore: FeedbackStore;
   viewerFeedbackStore: ViewerFeedbackStore;
   session: Session;
+  modelConfigStore: ModelConfigStore;
+  promptConfigStore: PromptConfigStore;
+  adminPasscode: string | undefined;
 }
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -21,6 +34,8 @@ export function createApp(deps: AppDeps): Express {
   const app = express();
   app.use(cors({ exposedHeaders: ['Content-Disposition'] }));
   app.use(express.json());
+
+  const adminAuth = createAdminAuth(deps.adminPasscode);
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
@@ -108,6 +123,41 @@ export function createApp(deps: AppDeps): Express {
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="feedback-all-${Date.now()}.csv"`);
     res.send(csv);
+  });
+
+  app.get('/admin/model-config', adminAuth, async (_req, res) => {
+    res.json(await deps.modelConfigStore.read());
+  });
+
+  app.put('/admin/model-config', adminAuth, async (req, res) => {
+    const config = validateModelConfig(req.body);
+    if (!config) {
+      res.status(400).json({ error: 'Invalid model config: all three roles must be set to a supported model id' });
+      return;
+    }
+    await deps.modelConfigStore.write(config);
+    res.json({ ok: true });
+  });
+
+  app.get('/admin/prompt-config', adminAuth, async (_req, res) => {
+    res.json({
+      notes: await deps.promptConfigStore.read(),
+      fixedRules: {
+        transcriptionVerifier: `${TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO}\n\n${TRANSCRIPTION_VERIFIER_FIXED_RULES_OUTRO}`,
+        translation: TRANSLATION_FIXED_RULES,
+        translationVerifier: `${TRANSLATION_VERIFIER_FIXED_RULES_INTRO}\n\n${TRANSLATION_VERIFIER_FIXED_RULES_OUTRO}`,
+      },
+    });
+  });
+
+  app.put('/admin/prompt-config', adminAuth, async (req, res) => {
+    const config = validatePromptConfig(req.body);
+    if (!config) {
+      res.status(400).json({ error: 'Invalid prompt config: all three roles must be set to a string' });
+      return;
+    }
+    await deps.promptConfigStore.write(config);
+    res.json({ ok: true });
   });
 
   return app;

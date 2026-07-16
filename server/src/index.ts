@@ -9,6 +9,8 @@ import { createSermonDocStore } from './sermonDocStore.js';
 import { createFeedbackStore } from './feedbackStore.js';
 import { createViewerFeedbackStore } from './viewerFeedbackStore.js';
 import { createCostTracker } from './costTracker.js';
+import { createModelConfigStore } from './modelConfigStore.js';
+import { createPromptConfigStore } from './promptConfigStore.js';
 import { withCostTracking } from './geminiCostTracking.js';
 import { withGeminiLimiter } from './geminiRateLimiting.js';
 import { GeminiCallLimiter } from './geminiLimiter.js';
@@ -32,8 +34,18 @@ const feedbackStore = createFeedbackStore(process.env.FEEDBACK_FILE_PATH ?? 'dat
 const viewerFeedbackStore = createViewerFeedbackStore(
   process.env.VIEWER_FEEDBACK_FILE_PATH ?? 'data/viewer-feedback.json'
 );
+const modelConfigStore = createModelConfigStore(process.env.MODEL_CONFIG_FILE_PATH ?? 'data/model-config.json');
+const promptConfigStore = createPromptConfigStore(process.env.PROMPT_CONFIG_FILE_PATH ?? 'data/prompt-config.json');
 
-const app = createApp({ sermonDocStore, feedbackStore, viewerFeedbackStore, session });
+const app = createApp({
+  sermonDocStore,
+  feedbackStore,
+  viewerFeedbackStore,
+  session,
+  modelConfigStore,
+  promptConfigStore,
+  adminPasscode: process.env.ADMIN_PASSCODE,
+});
 const httpServer = createServer(app);
 
 attachWsServer({
@@ -45,6 +57,8 @@ attachWsServer({
   sermonDocStore,
   feedbackStore,
   costTracker,
+  modelConfigStore,
+  promptConfigStore,
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;
