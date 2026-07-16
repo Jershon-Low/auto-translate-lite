@@ -5,10 +5,12 @@ function getLogFilePath(): string {
   return process.env.LOG_FILE_PATH ?? 'data/events.log';
 }
 
-export async function logEvent(level: 'warn' | 'error', payload: Record<string, unknown>): Promise<void> {
+export async function logEvent(level: 'info' | 'warn' | 'error', payload: Record<string, unknown>): Promise<void> {
   const line = JSON.stringify({ timestamp: new Date().toISOString(), level, ...payload });
 
-  if (level === 'warn') {
+  if (level === 'info') {
+    console.log(line);
+  } else if (level === 'warn') {
     console.warn(line);
   } else {
     console.error(line);

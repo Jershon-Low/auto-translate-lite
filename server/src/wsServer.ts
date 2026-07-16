@@ -6,7 +6,7 @@ import { translateSegment, translateBacklog, type GeminiClient, type SermonCache
 import { verifyTranslations, type VerificationItem, type VerificationResult } from './translationVerifier.js';
 import { verifyTranscription, type TranscriptionCheckResult } from './transcriptionVerifier.js';
 import type { DeepgramConnection, DeepgramConnectionFactory } from './deepgram.js';
-import { createSermonContextCache, deleteSermonContextCache } from './sermonCache.js';
+import { createSermonContextCache, deleteSermonContextCache, buildSermonContextInstruction } from './sermonCache.js';
 import type { SermonDocStore } from './sermonDocStore.js';
 import type { FeedbackStore } from './feedbackStore.js';
 import type { CostTracker } from './costTracker.js';
@@ -71,14 +71,21 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             deps.session.start();
 
             const sermonText = deps.sermonDocStore.get();
+            const feedbackText = await deps.feedbackStore.read();
             if (sermonText) {
-              const feedbackText = await deps.feedbackStore.read();
               deps.session.sermonCache = await createSermonContextCache(
                 deps.geminiClient,
                 feedbackText,
                 sermonText
               );
             }
+
+            void logEvent('info', {
+              event: 'session_context_cache',
+              sessionId: deps.session.id,
+              cacheName: deps.session.sermonCache?.name ?? null,
+              instruction: sermonText ? buildSermonContextInstruction(feedbackText, sermonText) : null,
+            });
 
             deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
               onFinalSegment: (text) => {
