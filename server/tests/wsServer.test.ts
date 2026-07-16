@@ -968,6 +968,85 @@ describe('wsServer', () => {
     });
   });
 
+  describe('translation cache (viewer subscribe burst fix)', () => {
+    it('caches the live-published translation for each active language', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const caption = await captionPromise;
+
+      expect(session.translationCache.get('zh', caption.id)).toBe('你好');
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('caches the English fallback when the verifier flags a translation as unsafe', async () => {
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: '{"zh":{"safe":false,"reason":"polarity flip"}}' });
+        }
+        return Promise.resolve({ text: '{"zh":"耶稣不爱你"}' });
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('Jesus loves you');
+      const caption = await captionPromise;
+
+      expect(session.translationCache.get('zh', caption.id)).toBe('Jesus loves you');
+
+      warnSpy.mockRestore();
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('does not cache anything for a language with no translation at all for that line', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'ko' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone'); // fakeGeminiClient's default translate only returns "zh"
+      await transcriptPromise;
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const recent = session.buffer.getRecent();
+      expect(session.translationCache.get('ko', recent[0].id)).toBeUndefined();
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+  });
+
   describe('admin-remove', () => {
     it('suppresses a live line, acks the capture socket with a "Removed by admin" reason, and broadcasts line-removed to viewers', async () => {
       const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);

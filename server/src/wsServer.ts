@@ -196,6 +196,7 @@ async function finishPublishing(
     const verification = verifications[language];
     const safe = verification?.safe === true;
     const outgoing = safe ? translated : line.english;
+    deps.session.translationCache.set(language, line.id, outgoing);
 
     if (!safe) {
       logTranslationFallback(language, line.english, translated, verification?.reason ?? 'verification unavailable');
