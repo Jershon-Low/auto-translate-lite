@@ -10,6 +10,8 @@ import { createFeedbackStore } from './feedbackStore.js';
 import { createViewerFeedbackStore } from './viewerFeedbackStore.js';
 import { createCostTracker } from './costTracker.js';
 import { withCostTracking } from './geminiCostTracking.js';
+import { withGeminiLimiter } from './geminiRateLimiting.js';
+import { GeminiCallLimiter } from './geminiLimiter.js';
 
 const requiredEnvVars = ['DEEPGRAM_API_KEY', 'GEMINI_API_KEY'] as const;
 for (const key of requiredEnvVars) {
@@ -20,7 +22,11 @@ for (const key of requiredEnvVars) {
 
 const session = new Session();
 const costTracker = createCostTracker(process.env.COST_FILE_PATH ?? 'data/cost.json');
-const geminiClient = withCostTracking(createGeminiClient(process.env.GEMINI_API_KEY!), costTracker);
+const geminiLimiter = new GeminiCallLimiter();
+const geminiClient = withCostTracking(
+  withGeminiLimiter(createGeminiClient(process.env.GEMINI_API_KEY!), geminiLimiter),
+  costTracker
+);
 const sermonDocStore = createSermonDocStore();
 const feedbackStore = createFeedbackStore(process.env.FEEDBACK_FILE_PATH ?? 'data/feedback.txt');
 const viewerFeedbackStore = createViewerFeedbackStore(
