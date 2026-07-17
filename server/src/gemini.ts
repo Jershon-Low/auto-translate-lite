@@ -39,11 +39,11 @@ export function createGeminiClient(apiKey: string): GeminiClient {
 
 // gemini-3.5-flash defaults to 'medium' thinking, which spends latency on
 // reasoning this app doesn't need for short live-caption sentences. Pin it to
-// 'low' — Google's docs describe 'low' as tuned for exactly this kind of
-// simple, high-throughput task. gemini-3.1-flash-lite already defaults to
-// 'minimal' (its fastest setting), so it's left alone.
+// 'minimal' — the fastest setting — since these are simple, high-throughput
+// translation/verification calls with no need for extended reasoning.
+// gemini-3.1-flash-lite already defaults to 'minimal', so it's left alone.
 export function thinkingConfigFor(model: string): { thinkingLevel: ThinkingLevel } | undefined {
-  return model === 'gemini-3.5-flash' ? { thinkingLevel: ThinkingLevel.LOW } : undefined;
+  return model === 'gemini-3.5-flash' ? { thinkingLevel: ThinkingLevel.MINIMAL } : undefined;
 }
 
 function buildContextBlock(precedingContext: string[]): string {

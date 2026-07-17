@@ -36,11 +36,11 @@ describe('verifyTranscription', () => {
     });
   });
 
-  it('pins thinkingLevel to LOW for gemini-3.5-flash but omits it for gemini-3.1-flash-lite', async () => {
+  it('pins thinkingLevel to MINIMAL for gemini-3.5-flash but omits it for gemini-3.1-flash-lite', async () => {
     const fastClient = fakeClient('{"safe":true,"reason":""}');
     await verifyTranscription(fastClient, 'gemini-3.5-flash', 'Jesus loves you', TRANSCRIPTION_VERIFIER_DEFAULT_NOTES);
     expect((fastClient.models.generateContent as any).mock.calls[0][0].config.thinkingConfig).toEqual({
-      thinkingLevel: ThinkingLevel.LOW,
+      thinkingLevel: ThinkingLevel.MINIMAL,
     });
 
     const liteClient = fakeClient('{"safe":true,"reason":""}');

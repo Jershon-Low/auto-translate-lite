@@ -92,11 +92,11 @@ describe('translateSegment', () => {
     expect(call.model).toBe('gemini-3.5-flash');
   });
 
-  it('pins thinkingLevel to LOW for gemini-3.5-flash, which otherwise defaults to slower medium-effort thinking', async () => {
+  it('pins thinkingLevel to MINIMAL for gemini-3.5-flash, which otherwise defaults to slower medium-effort thinking', async () => {
     const client = fakeClient('{"zh":"你好"}');
     await translateSegment(client, 'gemini-3.5-flash', 'Hello', ['zh'], TRANSLATION_DEFAULT_NOTES);
     const call = (client.models.generateContent as any).mock.calls[0][0];
-    expect(call.config.thinkingConfig).toEqual({ thinkingLevel: ThinkingLevel.LOW });
+    expect(call.config.thinkingConfig).toEqual({ thinkingLevel: ThinkingLevel.MINIMAL });
   });
 
   it('omits thinkingConfig for gemini-3.1-flash-lite, which already defaults to its fastest thinking level', async () => {
@@ -138,10 +138,10 @@ describe('translateBacklog', () => {
     expect(call.contents).not.toContain('Australian slang');
   });
 
-  it('pins thinkingLevel to LOW for gemini-3.5-flash', async () => {
+  it('pins thinkingLevel to MINIMAL for gemini-3.5-flash', async () => {
     const client = fakeClient('{"translations":["你好"]}');
     await translateBacklog(client, 'gemini-3.5-flash', ['Hello'], 'zh', TRANSLATION_DEFAULT_NOTES);
     const call = (client.models.generateContent as any).mock.calls[0][0];
-    expect(call.config.thinkingConfig).toEqual({ thinkingLevel: ThinkingLevel.LOW });
+    expect(call.config.thinkingConfig).toEqual({ thinkingLevel: ThinkingLevel.MINIMAL });
   });
 });

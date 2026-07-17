@@ -41,13 +41,13 @@ describe('verifyTranslations', () => {
     expect(result).toEqual({ zh: { safe: false, reason: 'polarity flip: negates original meaning' } });
   });
 
-  it('pins thinkingLevel to LOW for gemini-3.5-flash but omits it for gemini-3.1-flash-lite', async () => {
+  it('pins thinkingLevel to MINIMAL for gemini-3.5-flash but omits it for gemini-3.1-flash-lite', async () => {
     const items = [{ id: 'zh', english: 'Jesus loves you', translated: '耶稣爱你' }];
 
     const fastClient = fakeClient('{"zh":{"safe":true,"reason":""}}');
     await verifyTranslations(fastClient, 'gemini-3.5-flash', items, TRANSLATION_VERIFIER_DEFAULT_NOTES);
     expect((fastClient.models.generateContent as any).mock.calls[0][0].config.thinkingConfig).toEqual({
-      thinkingLevel: ThinkingLevel.LOW,
+      thinkingLevel: ThinkingLevel.MINIMAL,
     });
 
     const liteClient = fakeClient('{"zh":{"safe":true,"reason":""}}');
