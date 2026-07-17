@@ -381,6 +381,153 @@ describe('wsServer', () => {
     viewerSocket.close();
   });
 
+  describe('decoupled translation pipeline', () => {
+    it("does not block a second segment's ack on the first segment's pending translate call", async () => {
+      let resolveFirstTranslate!: (value: { text: string }) => void;
+      const firstTranslate = new Promise<{ text: string }>((resolve) => {
+        resolveFirstTranslate = resolve;
+      });
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        if (params.contents.includes('Sentence: "Line 1"')) return firstTranslate;
+        return Promise.resolve({ text: '{"zh":"你好2"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      // A subscribed viewer is required so activeLanguages is non-empty —
+      // translateWithFallback short-circuits without calling Gemini at all
+      // when there are zero active languages, which would make firstTranslate
+      // irrelevant and defeat the point of this test.
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const firstAckPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Line 1');
+      const firstAck = await firstAckPromise;
+      expect(firstAck).toEqual({ type: 'transcript', id: expect.any(String), english: 'Line 1' });
+
+      // Line 1's translate call is still pending (firstTranslate unresolved).
+      // A second segment must still get its ack without waiting for it.
+      const secondAckPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Line 2');
+      const secondAck = await secondAckPromise;
+      expect(secondAck).toEqual({ type: 'transcript', id: expect.any(String), english: 'Line 2' });
+
+      resolveFirstTranslate({ text: '{"zh":"你好1"}' });
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('publishes captions to viewers in original order even when a later line translates first', async () => {
+      let resolveFirstTranslate!: (value: { text: string }) => void;
+      const firstTranslate = new Promise<{ text: string }>((resolve) => {
+        resolveFirstTranslate = resolve;
+      });
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        if (params.contents.includes('Sentence: "Line 1"')) return firstTranslate;
+        return Promise.resolve({ text: '{"zh":"你好2"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const viewerMessages: any[] = [];
+      viewerSocket.on('message', (data) => viewerMessages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Line 1');
+      await waitForMessage(captureSocket); // Line 1 ack
+      capturedCallbacks!.onFinalSegment('Line 2');
+      await waitForMessage(captureSocket); // Line 2 ack
+
+      // Line 2's translate call already resolved. Give its publish work a
+      // chance to run, and confirm it does NOT jump ahead of Line 1.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(viewerMessages).toEqual([]);
+
+      resolveFirstTranslate({ text: '{"zh":"你好1"}' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(viewerMessages).toEqual([
+        { type: 'caption', id: expect.any(String), english: 'Line 1', translated: '你好1' },
+        { type: 'caption', id: expect.any(String), english: 'Line 2', translated: '你好2' },
+      ]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('prefetches translations for a suppressed line in the background without publishing them', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+      const viewerMessages: any[] = [];
+      viewerSocket.on('message', (data) => viewerMessages.push(JSON.parse(data.toString())));
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":false,"reason":"likely mis-heard negation"}' });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
+      const transcript = await transcriptPromise;
+      expect(transcript).toMatchObject({ flagged: true });
+
+      // Prefetch runs detached from the ingest queue; give its promise chain
+      // a tick to settle, then confirm the buffer entry was filled in.
+      // (A 'line-removed' broadcast for the new suppressed line is expected —
+      // see the "flagged as unsafe" and "manual mode" tests above — but no
+      // 'caption' message should ever reach the still-suppressed viewer.)
+      await new Promise((resolve) => setImmediate(resolve));
+      const stored = session.buffer.peek(transcript.id);
+      expect(stored?.pendingTranslations).toEqual({ zh: '你好' });
+      expect(viewerMessages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+  });
+
   it('falls back to English in the backlog when the verifier flags a line as unsafe', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -952,6 +1099,71 @@ describe('wsServer', () => {
       return { id: transcript.id, english: transcript.english };
     }
 
+    it("does not block the ingest queue on reinstate's translate call in manual mode", async () => {
+      let resolveReinstateTranslate!: (value: { text: string }) => void;
+      const heldTranslate = new Promise<{ text: string }>((resolve) => {
+        resolveReinstateTranslate = resolve;
+      });
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        if (params.contents.includes('Sentence: "Edited line"')) return heldTranslate;
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      // A subscribed viewer is required so activeLanguages is non-empty —
+      // translateWithFallback short-circuits without calling Gemini at all
+      // when there are zero active languages, which would make heldTranslate
+      // irrelevant and defeat the point of this test.
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+      // set-mode has no ack message, so give the real socket I/O a tick to
+      // land before triggering onFinalSegment directly (see the same wait
+      // used throughout the "manual approval mode" describe block below).
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const pendingAckPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Original line');
+      const pendingAck = await pendingAckPromise;
+      expect(pendingAck).toMatchObject({ type: 'transcript', english: 'Original line', flagged: true, pending: true });
+
+      // Approve with edited text (the operator corrected the transcription
+      // before pressing Enter) — this always pays a fresh, uncached translate
+      // call, which is the case that used to stall the queue.
+      const reinstateAckPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'reinstate', id: pendingAck.id, english: 'Edited line' }));
+      const reinstateAck = await reinstateAckPromise;
+      expect(reinstateAck).toEqual({ type: 'transcript', id: pendingAck.id, english: 'Edited line' });
+
+      // The reinstate's translate call (heldTranslate) is still pending. The
+      // ingest queue must still process a new segment without waiting on it.
+      const nextAckPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Next segment');
+      const nextAck = await nextAckPromise;
+      expect(nextAck).toMatchObject({ english: 'Next segment' });
+
+      resolveReinstateTranslate({ text: '{"zh":"编辑后的行"}' });
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
     it('reinstates with unedited text: un-flags the capture line and broadcasts caption-inserted', async () => {
       const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
       await waitForOpen(captureSocket);
@@ -1451,6 +1663,63 @@ describe('wsServer', () => {
         english: 'Hello everyone, corrected',
         translated: '你好',
       });
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('does not publish a caption to viewers for a line admin-removed while its translate call was still pending', async () => {
+      let resolveTranslate!: (value: { text: string }) => void;
+      const pendingTranslate = new Promise<{ text: string }>((resolve) => {
+        resolveTranslate = resolve;
+      });
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        return pendingTranslate;
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const viewerMessages: any[] = [];
+      viewerSocket.on('message', (data) => viewerMessages.push(JSON.parse(data.toString())));
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const transcript = await transcriptPromise;
+
+      // The line's translate call is still in flight (pendingTranslate is
+      // unresolved) when the operator admin-removes it.
+      const removeAckPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: transcript.id }));
+      await removeAckPromise;
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(viewerMessages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+
+      // Now let the deferred translate resolve. The queued publish must be
+      // skipped since the line was suppressed in the meantime.
+      resolveTranslate({ text: '{"zh":"你好"}' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(viewerMessages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+      expect(viewerMessages.some((message) => message.type === 'caption')).toBe(false);
 
       captureSocket.close();
       viewerSocket.close();
