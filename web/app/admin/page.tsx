@@ -20,6 +20,12 @@ interface PromptConfig {
   translationVerifier: string;
 }
 
+type TranslationFlagDisplayMode = 'hide' | 'flag';
+
+interface TranslationFlagDisplayConfig {
+  mode: TranslationFlagDisplayMode;
+}
+
 const ROLE_LABELS: Record<Role, string> = {
   transcriptionVerifier: 'Transcription verifier',
   translation: 'Translation',
@@ -45,6 +51,10 @@ export default function AdminPage() {
   const [notesSaveStatus, setNotesSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [notesError, setNotesError] = useState<string | null>(null);
 
+  const [displayConfig, setDisplayConfig] = useState<TranslationFlagDisplayConfig | null>(null);
+  const [displaySaveStatus, setDisplaySaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [displayError, setDisplayError] = useState<string | null>(null);
+
   useEffect(() => {
     const stored = window.sessionStorage.getItem('adminPasscode');
     if (stored) {
@@ -57,12 +67,13 @@ export default function AdminPage() {
     setCheckingAuth(true);
     setAuthError(null);
     try {
-      const [modelResponse, promptResponse] = await Promise.all([
+      const [modelResponse, promptResponse, displayResponse] = await Promise.all([
         fetch(`${API_URL}/admin/model-config`, { headers: { 'x-admin-passcode': candidatePasscode } }),
         fetch(`${API_URL}/admin/prompt-config`, { headers: { 'x-admin-passcode': candidatePasscode } }),
+        fetch(`${API_URL}/admin/translation-flag-display`, { headers: { 'x-admin-passcode': candidatePasscode } }),
       ]);
 
-      if (modelResponse.status === 401 || promptResponse.status === 401) {
+      if (modelResponse.status === 401 || promptResponse.status === 401 || displayResponse.status === 401) {
         window.sessionStorage.removeItem('adminPasscode');
         setAuthorized(false);
         setAuthError('Incorrect passcode.');
@@ -73,6 +84,7 @@ export default function AdminPage() {
       const promptData = await promptResponse.json();
       setNotes(promptData.notes);
       setFixedRules(promptData.fixedRules);
+      setDisplayConfig(await displayResponse.json());
 
       window.sessionStorage.setItem('adminPasscode', candidatePasscode);
       setPasscode(candidatePasscode);
@@ -129,6 +141,28 @@ export default function AdminPage() {
     } catch {
       setNotesError('Save failed. Check your connection and try again.');
       setNotesSaveStatus('idle');
+    }
+  }
+
+  async function saveDisplayConfig() {
+    if (!displayConfig) return;
+    setDisplaySaveStatus('saving');
+    setDisplayError(null);
+    try {
+      const response = await fetch(`${API_URL}/admin/translation-flag-display`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'x-admin-passcode': passcode },
+        body: JSON.stringify(displayConfig),
+      });
+      if (!response.ok) {
+        setDisplayError(`Save failed (status ${response.status}).`);
+        setDisplaySaveStatus('idle');
+        return;
+      }
+      setDisplaySaveStatus('saved');
+    } catch {
+      setDisplayError('Save failed. Check your connection and try again.');
+      setDisplaySaveStatus('idle');
     }
   }
 
@@ -227,6 +261,49 @@ export default function AdminPage() {
           {notesSaveStatus === 'saved' && <p className="text-sm text-green-600">Saved.</p>}
         </div>
         {notesError && <p className="text-sm text-destructive">{notesError}</p>}
+      </div>
+
+      <div className="w-full max-w-xl flex flex-col gap-3">
+        <h2 className="text-lg font-medium">Unsafe translation display</h2>
+        {displayConfig && (
+          <div className="flex flex-col gap-2 text-sm">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="translationFlagDisplayMode"
+                checked={displayConfig.mode === 'hide'}
+                onChange={() => {
+                  setDisplayConfig({ mode: 'hide' });
+                  setDisplaySaveStatus('idle');
+                }}
+              />
+              Hide (fallback to English)
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="translationFlagDisplayMode"
+                checked={displayConfig.mode === 'flag'}
+                onChange={() => {
+                  setDisplayConfig({ mode: 'flag' });
+                  setDisplaySaveStatus('idle');
+                }}
+              />
+              Show in viewer, marked red, with reason
+            </label>
+          </div>
+        )}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={saveDisplayConfig}
+            disabled={displaySaveStatus === 'saving'}
+            className="bg-secondary text-secondary-foreground px-4 py-2 rounded disabled:opacity-50"
+          >
+            Save display setting
+          </button>
+          {displaySaveStatus === 'saved' && <p className="text-sm text-green-600">Saved.</p>}
+        </div>
+        {displayError && <p className="text-sm text-destructive">{displayError}</p>}
       </div>
     </main>
   );
