@@ -17,7 +17,7 @@ This design decouples the slow `translation` call from the ordered queue, withou
 - Applies uniformly to both Automatic mode (`handleFinalSegment`) and Manual mode (`handleReinstate`) — the Enter-key stall and the auto-mode backlog are the same root cause and get the same fix.
 - No change to `transcriptionVerifier`'s behavior, `TranscriptBuffer`'s public shape, the `GeminiCallLimiter` concurrency cap, or any client/viewer-facing message format.
 - No change to `translateBacklog` / `ensureBacklogCached` (new-viewer language backfill) — that path is already decoupled from `processingQueue` via `deps.session.inFlightFills` and is unaffected by this change.
-- Explicitly out of scope: raising the `GeminiCallLimiter` cap (currently 8; a tuning question to revisit after observing real behavior, not part of this change); decoupling `translationVerifier` from the ordered publish step (already fast, diminishing returns); speculative/out-of-order transcription-checking (rejected as Approach B during design discussion — too much context-correctness risk for a step that isn't the actual bottleneck).
+- Explicitly out of scope: raising the `GeminiCallLimiter` cap (currently 15; a tuning question to revisit after observing real behavior, not part of this change); decoupling `translationVerifier` from the ordered publish step (already fast, diminishing returns); speculative/out-of-order transcription-checking (rejected as Approach B during design discussion — too much context-correctness risk for a step that isn't the actual bottleneck).
 
 ## Design
 
@@ -26,7 +26,7 @@ This design decouples the slow `translation` call from the ordered queue, withou
 `processingQueue` is replaced by:
 
 - **`ingestQueue`** — everything that must stay strictly ordered and is cheap: transcription safety-check (`verifyTranscriptionWithRetry`, flash-lite by default), buffer mutation (`append` / `suppress` / `reinstate`), and the immediate `{ type: 'transcript' }` ack to the capture socket. Nothing here awaits a `translation` call.
-- **`publishQueue`** — ordered *delivery* to viewers. A line's `translation` Gemini call is fired the instant `ingestQueue` decides the line is ready — not deferred — so multiple lines' calls can be in flight concurrently (still bounded by the existing 8-slot `GeminiCallLimiter`). `publishQueue` only serializes *waiting for, then sending,* each line's result, in the same order `ingestQueue` produced them.
+- **`publishQueue`** — ordered *delivery* to viewers. A line's `translation` Gemini call is fired the instant `ingestQueue` decides the line is ready — not deferred — so multiple lines' calls can be in flight concurrently (still bounded by the existing `GeminiCallLimiter`, currently a 15-slot cap). `publishQueue` only serializes *waiting for, then sending,* each line's result, in the same order `ingestQueue` produced them.
 
 Both `onFinalSegment` and `reinstate` continue to append to `ingestQueue` exactly as they do today (preserving relative ordering between spoken segments and operator actions); what changes is that each `ingestQueue` step returns as soon as buffer state is settled, instead of after translation completes.
 
@@ -103,7 +103,7 @@ Unchanged. It never awaited a translation call, so it simply moves onto `ingestQ
 
 - **Concurrent cache-error retries**: `translateWithFallback`'s existing behavior — on a cache-related error, null `deps.session.roleCaches.translation` and retry inline without the cache — is unaffected by running concurrently. If two in-flight calls hit the same stale cache at once, both null it (idempotent) and both retry inline; that burst costs a few extra tokens, not correctness.
 - **Prefetch failure**: `translateWithFallback` already resolves to `{}` on total failure (logged via `logEvent`, never rejects), so a failed `schedulePrefetch` just leaves `pendingTranslations` empty; `handleReinstateFast` naturally falls back to a fresh translate for those languages, identical to today's cache-miss path.
-- **Unbounded fan-out**: the existing 8-slot `GeminiCallLimiter` already caps true concurrency across all Gemini calls system-wide, so decoupling can't cause more than 8 `translate`/`verify` calls in flight at once — it only lets that existing cap actually get used, instead of the queue accidentally serializing everything down to ~1 call at a time.
+- **Unbounded fan-out**: the existing `GeminiCallLimiter` (currently a 15-slot cap) already caps true concurrency across all Gemini calls system-wide, so decoupling can't cause more concurrent `translate`/`verify` calls than that cap allows — it only lets that existing cap actually get used, instead of the queue accidentally serializing everything down to ~1 call at a time.
 - **Session stop mid-flight**: unchanged from today — `stop()` clears `roleCaches` and the buffer; any in-flight `workPromise` still resolves harmlessly (its `publishQueue`/prefetch continuation runs against a possibly-cleared session, matching existing behavior for in-flight calls at session boundaries).
 
 ## Testing
