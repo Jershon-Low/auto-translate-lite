@@ -1340,7 +1340,7 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('Hello everyone');
       const caption = await captionPromise;
 
-      expect(session.translationCache.get('zh', caption.id)).toBe('你好');
+      expect(session.translationCache.get('zh', caption.id)?.translated).toBe('你好');
 
       captureSocket.close();
       viewerSocket.close();
@@ -1372,7 +1372,7 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('Jesus loves you');
       const caption = await captionPromise;
 
-      expect(session.translationCache.get('zh', caption.id)).toBe('Jesus loves you');
+      expect(session.translationCache.get('zh', caption.id)?.translated).toBe('Jesus loves you');
 
       warnSpy.mockRestore();
       captureSocket.close();
@@ -1532,7 +1532,7 @@ describe('wsServer', () => {
       await ackPromise;
       await insertedPromise;
 
-      expect(session.translationCache.get('zh', flagged.id)).toBe('耶稣确实是神的儿子');
+      expect(session.translationCache.get('zh', flagged.id)?.translated).toBe('耶稣确实是神的儿子');
 
       const callsBeforeSecondSubscribe = (geminiClient.models.generateContent as any).mock.calls.length;
 

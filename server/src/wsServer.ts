@@ -270,7 +270,7 @@ async function finishPublishing(
     const verification = verifications[language];
     const safe = verification?.safe === true;
     const outgoing = safe ? translated : line.english;
-    deps.session.translationCache.set(language, line.id, outgoing);
+    deps.session.translationCache.set(language, line.id, { translated: outgoing, flagged: false });
 
     if (!safe) {
       logTranslationFallback(language, line.english, translated, verification?.reason || 'verification unavailable');
@@ -524,7 +524,7 @@ async function ensureBacklogCached(
         error: error instanceof Error ? error.message : String(error),
       });
       for (const line of missingEntries) {
-        cache.set(language, line.id, line.english);
+        cache.set(language, line.id, { translated: line.english, flagged: false });
       }
       return;
     }
@@ -537,16 +537,16 @@ async function ensureBacklogCached(
     missingEntries.forEach((line, index) => {
       const translated = translations[index];
       if (!translated) {
-        cache.set(language, line.id, line.english);
+        cache.set(language, line.id, { translated: line.english, flagged: false });
         return;
       }
       const verification = verifications[line.id];
       if (verification?.safe === true) {
-        cache.set(language, line.id, translated);
+        cache.set(language, line.id, { translated, flagged: false });
         return;
       }
       logTranslationFallback(language, line.english, translated, verification?.reason || 'verification unavailable');
-      cache.set(language, line.id, line.english);
+      cache.set(language, line.id, { translated: line.english, flagged: false });
     });
   })();
 
@@ -578,7 +578,7 @@ function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
           const lines = backlog.map((line) =>
             line.suppressed
               ? { id: line.id, english: '', translated: '', removed: true }
-              : { id: line.id, english: line.english, translated: cache.get(language, line.id) ?? line.english }
+              : { id: line.id, english: line.english, translated: cache.get(language, line.id)?.translated ?? line.english }
           );
 
           ws.send(JSON.stringify({ type: 'backlog', lines }));

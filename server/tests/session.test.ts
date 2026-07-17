@@ -84,7 +84,7 @@ describe('Session', () => {
 
   it('start() replaces the translation cache, discarding anything cached in the previous session', () => {
     const session = new Session();
-    session.translationCache.set('zh', 'old-line', '你好');
+    session.translationCache.set('zh', 'old-line', { translated: '你好', flagged: false });
     session.start();
     expect(session.translationCache.get('zh', 'old-line')).toBeUndefined();
   });

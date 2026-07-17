@@ -1,17 +1,23 @@
-export class TranslationCache {
-  private byLanguage: Map<string, Map<string, string>> = new Map();
+export interface CachedTranslation {
+  translated: string;
+  flagged: boolean;
+  reason?: string;
+}
 
-  get(language: string, lineId: string): string | undefined {
+export class TranslationCache {
+  private byLanguage: Map<string, Map<string, CachedTranslation>> = new Map();
+
+  get(language: string, lineId: string): CachedTranslation | undefined {
     return this.byLanguage.get(language)?.get(lineId);
   }
 
-  set(language: string, lineId: string, translated: string): void {
+  set(language: string, lineId: string, entry: CachedTranslation): void {
     let lines = this.byLanguage.get(language);
     if (!lines) {
       lines = new Map();
       this.byLanguage.set(language, lines);
     }
-    lines.set(lineId, translated);
+    lines.set(lineId, entry);
   }
 
   clear(): void {
