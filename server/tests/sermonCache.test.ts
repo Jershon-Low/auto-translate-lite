@@ -34,26 +34,33 @@ const promptConfig: PromptConfig = {
   translationVerifier: 'vv notes',
 };
 
+// Gemini rejects cached content under 1024 tokens (~4.5 chars/token here, see
+// sermonCache.ts). Fixed rules + short notes alone fall well short of that,
+// so tests exercising the "cache actually gets created" path need enough
+// padding to realistically cross the threshold, the way a real sermon
+// document would.
+const PADDING = 'Today we talk about faith and hope in difficult times. '.repeat(100);
+
 describe('createRoleCaches', () => {
-  it('creates one cache per role, even with no sermon document or feedback text, since fixed rules + notes are always substantial', async () => {
+  it('skips cache creation entirely for every role when there is no sermon document or feedback text, since fixed rules + notes alone fall well under the 1024-token minimum Gemini requires', async () => {
     const client = fakeClientWithCaches();
     const caches = await createRoleCaches(client, modelConfig, promptConfig, '', '');
-    expect(client.caches.create).toHaveBeenCalledTimes(3);
-    expect(caches.transcriptionVerifier).not.toBeNull();
-    expect(caches.translation).not.toBeNull();
-    expect(caches.translationVerifier).not.toBeNull();
+    expect(client.caches.create).not.toHaveBeenCalled();
+    expect(caches.transcriptionVerifier).toBeNull();
+    expect(caches.translation).toBeNull();
+    expect(caches.translationVerifier).toBeNull();
   });
 
-  it('creates each role\'s cache against that role\'s configured model', async () => {
+  it('creates each role\'s cache against that role\'s configured model once enough sermon material is present', async () => {
     const client = fakeClientWithCaches();
-    await createRoleCaches(client, modelConfig, promptConfig, '', '');
+    await createRoleCaches(client, modelConfig, promptConfig, '', PADDING);
     const createCalls = (client.caches.create as any).mock.calls.map((call: any) => call[0].model);
     expect(createCalls).toEqual(['gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemini-3.1-flash-lite']);
   });
 
   it("includes each role's fixed rules and editable notes in its own systemInstruction, not the other roles'", async () => {
     const client = fakeClientWithCaches();
-    await createRoleCaches(client, modelConfig, promptConfig, '', '');
+    await createRoleCaches(client, modelConfig, promptConfig, '', PADDING);
     const instructions = (client.caches.create as any).mock.calls.map((call: any) => call[0].config.systemInstruction);
     expect(instructions[0]).toContain('tv notes');
     expect(instructions[0]).not.toContain('t notes and'); // sanity: not leaking translation notes verbatim as a substring collision
@@ -64,7 +71,13 @@ describe('createRoleCaches', () => {
 
   it('includes shared feedback and sermon material in every role\'s cache', async () => {
     const client = fakeClientWithCaches();
-    await createRoleCaches(client, modelConfig, promptConfig, 'Cain should be 该隐 in Chinese', 'Today we talk about Cain and Abel.');
+    await createRoleCaches(
+      client,
+      modelConfig,
+      promptConfig,
+      `Cain should be 该隐 in Chinese. ${PADDING}`,
+      `Today we talk about Cain and Abel. ${PADDING}`
+    );
     const instructions = (client.caches.create as any).mock.calls.map((call: any) => call[0].config.systemInstruction);
     for (const instruction of instructions) {
       expect(instruction).toContain('Known corrections from past sessions');
@@ -76,7 +89,7 @@ describe('createRoleCaches', () => {
 
   it('omits the feedback section when feedback text is empty', async () => {
     const client = fakeClientWithCaches();
-    await createRoleCaches(client, modelConfig, promptConfig, '', 'Sermon content here.');
+    await createRoleCaches(client, modelConfig, promptConfig, '', `Sermon content here. ${PADDING}`);
     const instructions = (client.caches.create as any).mock.calls.map((call: any) => call[0].config.systemInstruction);
     for (const instruction of instructions) {
       expect(instruction).not.toContain('Known corrections from past sessions');
@@ -88,7 +101,7 @@ describe('createRoleCaches', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const client = fakeClientWithCaches();
     (client.caches.create as any).mockImplementationOnce(() => Promise.reject(new Error('API down')));
-    const caches = await createRoleCaches(client, modelConfig, promptConfig, '', '');
+    const caches = await createRoleCaches(client, modelConfig, promptConfig, '', PADDING);
     expect(caches.transcriptionVerifier).toBeNull();
     expect(caches.translation).not.toBeNull();
     expect(caches.translationVerifier).not.toBeNull();

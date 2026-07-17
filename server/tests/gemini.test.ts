@@ -1,3 +1,4 @@
+import { ThinkingLevel } from '@google/genai';
 import { describe, it, expect, vi } from 'vitest';
 import { translateSegment, translateBacklog, type GeminiClient } from '../src/gemini';
 import { TRANSLATION_DEFAULT_NOTES } from '../src/llmPrompts';
@@ -90,6 +91,20 @@ describe('translateSegment', () => {
     const call = (client.models.generateContent as any).mock.calls[0][0];
     expect(call.model).toBe('gemini-3.5-flash');
   });
+
+  it('pins thinkingLevel to LOW for gemini-3.5-flash, which otherwise defaults to slower medium-effort thinking', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    await translateSegment(client, 'gemini-3.5-flash', 'Hello', ['zh'], TRANSLATION_DEFAULT_NOTES);
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.config.thinkingConfig).toEqual({ thinkingLevel: ThinkingLevel.LOW });
+  });
+
+  it('omits thinkingConfig for gemini-3.1-flash-lite, which already defaults to its fastest thinking level', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    await translateSegment(client, MODEL, 'Hello', ['zh'], TRANSLATION_DEFAULT_NOTES);
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.config.thinkingConfig).toBeUndefined();
+  });
 });
 
 describe('translateBacklog', () => {
@@ -121,5 +136,12 @@ describe('translateBacklog', () => {
     const call = (client.models.generateContent as any).mock.calls[0][0];
     expect(call.config.cachedContent).toBe('cachedContents/abc');
     expect(call.contents).not.toContain('Australian slang');
+  });
+
+  it('pins thinkingLevel to LOW for gemini-3.5-flash', async () => {
+    const client = fakeClient('{"translations":["你好"]}');
+    await translateBacklog(client, 'gemini-3.5-flash', ['Hello'], 'zh', TRANSLATION_DEFAULT_NOTES);
+    const call = (client.models.generateContent as any).mock.calls[0][0];
+    expect(call.config.thinkingConfig).toEqual({ thinkingLevel: ThinkingLevel.LOW });
   });
 });

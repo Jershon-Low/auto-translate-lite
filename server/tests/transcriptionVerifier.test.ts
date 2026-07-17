@@ -1,3 +1,4 @@
+import { ThinkingLevel } from '@google/genai';
 import { describe, it, expect, vi } from 'vitest';
 import { verifyTranscription } from '../src/transcriptionVerifier';
 import type { GeminiClient } from '../src/gemini';
@@ -33,6 +34,18 @@ describe('verifyTranscription', () => {
       safe: false,
       reason: 'likely mis-heard: negates a core statement about Jesus',
     });
+  });
+
+  it('pins thinkingLevel to LOW for gemini-3.5-flash but omits it for gemini-3.1-flash-lite', async () => {
+    const fastClient = fakeClient('{"safe":true,"reason":""}');
+    await verifyTranscription(fastClient, 'gemini-3.5-flash', 'Jesus loves you', TRANSCRIPTION_VERIFIER_DEFAULT_NOTES);
+    expect((fastClient.models.generateContent as any).mock.calls[0][0].config.thinkingConfig).toEqual({
+      thinkingLevel: ThinkingLevel.LOW,
+    });
+
+    const liteClient = fakeClient('{"safe":true,"reason":""}');
+    await verifyTranscription(liteClient, MODEL, 'Jesus loves you', TRANSCRIPTION_VERIFIER_DEFAULT_NOTES);
+    expect((liteClient.models.generateContent as any).mock.calls[0][0].config.thinkingConfig).toBeUndefined();
   });
 
   it('includes Australian slang guidance and the leave-reason-empty-when-safe instruction when uncached', async () => {

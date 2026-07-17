@@ -1,3 +1,4 @@
+import { ThinkingLevel } from '@google/genai';
 import { describe, it, expect, vi } from 'vitest';
 import { verifyTranslations } from '../src/translationVerifier';
 import type { GeminiClient } from '../src/gemini';
@@ -38,6 +39,20 @@ describe('verifyTranslations', () => {
       TRANSLATION_VERIFIER_DEFAULT_NOTES
     );
     expect(result).toEqual({ zh: { safe: false, reason: 'polarity flip: negates original meaning' } });
+  });
+
+  it('pins thinkingLevel to LOW for gemini-3.5-flash but omits it for gemini-3.1-flash-lite', async () => {
+    const items = [{ id: 'zh', english: 'Jesus loves you', translated: '耶稣爱你' }];
+
+    const fastClient = fakeClient('{"zh":{"safe":true,"reason":""}}');
+    await verifyTranslations(fastClient, 'gemini-3.5-flash', items, TRANSLATION_VERIFIER_DEFAULT_NOTES);
+    expect((fastClient.models.generateContent as any).mock.calls[0][0].config.thinkingConfig).toEqual({
+      thinkingLevel: ThinkingLevel.LOW,
+    });
+
+    const liteClient = fakeClient('{"zh":{"safe":true,"reason":""}}');
+    await verifyTranslations(liteClient, MODEL, items, TRANSLATION_VERIFIER_DEFAULT_NOTES);
+    expect((liteClient.models.generateContent as any).mock.calls[0][0].config.thinkingConfig).toBeUndefined();
   });
 
   it('batches every item into a single generateContent call', async () => {

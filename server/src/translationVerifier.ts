@@ -1,4 +1,4 @@
-import type { GeminiClient, SermonCacheRef } from './gemini.js';
+import { thinkingConfigFor, type GeminiClient, type SermonCacheRef } from './gemini.js';
 import { TRANSLATION_VERIFIER_FIXED_RULES_INTRO, TRANSLATION_VERIFIER_FIXED_RULES_OUTRO } from './llmPrompts.js';
 
 export interface VerificationItem {
@@ -58,6 +58,7 @@ Return, for each id, whether it is safe and a short reason.`,
       responseMimeType: 'application/json',
       responseSchema: { type: 'object', properties, required: items.map((item) => item.id) },
       ...(cacheRef ? { cachedContent: cacheRef.name } : {}),
+      ...(thinkingConfigFor(model) ? { thinkingConfig: thinkingConfigFor(model) } : {}),
     },
   });
 

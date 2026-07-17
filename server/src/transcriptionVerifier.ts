@@ -1,4 +1,4 @@
-import type { GeminiClient, SermonCacheRef } from './gemini.js';
+import { thinkingConfigFor, type GeminiClient, type SermonCacheRef } from './gemini.js';
 import { TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO, TRANSCRIPTION_VERIFIER_FIXED_RULES_OUTRO } from './llmPrompts.js';
 
 export interface TranscriptionCheckResult {
@@ -44,6 +44,7 @@ Return whether it is safe and a short reason.`,
         required: ['safe', 'reason'],
       },
       ...(cacheRef ? { cachedContent: cacheRef.name } : {}),
+      ...(thinkingConfigFor(model) ? { thinkingConfig: thinkingConfigFor(model) } : {}),
     },
   });
 

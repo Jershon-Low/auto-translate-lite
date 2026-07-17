@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { TRANSLATION_FIXED_RULES } from './llmPrompts.js';
 
 export interface SermonCacheRef {
@@ -20,6 +20,7 @@ export interface GeminiClient {
         responseMimeType: string;
         responseSchema: Record<string, unknown>;
         cachedContent?: string;
+        thinkingConfig?: { thinkingLevel: ThinkingLevel };
       };
     }): Promise<{ text: string | null | undefined; usageMetadata?: GeminiUsageMetadata }>;
   };
@@ -34,6 +35,15 @@ export interface GeminiClient {
 
 export function createGeminiClient(apiKey: string): GeminiClient {
   return new GoogleGenAI({ apiKey });
+}
+
+// gemini-3.5-flash defaults to 'medium' thinking, which spends latency on
+// reasoning this app doesn't need for short live-caption sentences. Pin it to
+// 'low' — Google's docs describe 'low' as tuned for exactly this kind of
+// simple, high-throughput task. gemini-3.1-flash-lite already defaults to
+// 'minimal' (its fastest setting), so it's left alone.
+export function thinkingConfigFor(model: string): { thinkingLevel: ThinkingLevel } | undefined {
+  return model === 'gemini-3.5-flash' ? { thinkingLevel: ThinkingLevel.LOW } : undefined;
 }
 
 function buildContextBlock(precedingContext: string[]): string {
@@ -70,6 +80,7 @@ ${instructionBlock}${buildContextBlock(precedingContext)}Sentence: "${englishTex
       responseMimeType: 'application/json',
       responseSchema: { type: 'object', properties, required: languageCodes },
       ...(cacheRef ? { cachedContent: cacheRef.name } : {}),
+      ...(thinkingConfigFor(model) ? { thinkingConfig: thinkingConfigFor(model) } : {}),
     },
   });
 
@@ -101,6 +112,7 @@ ${instructionBlock}Sentences: ${JSON.stringify(englishLines)}`,
         required: ['translations'],
       },
       ...(cacheRef ? { cachedContent: cacheRef.name } : {}),
+      ...(thinkingConfigFor(model) ? { thinkingConfig: thinkingConfigFor(model) } : {}),
     },
   });
 

@@ -17,6 +17,17 @@ import { logEvent } from './logger.js';
 
 const PRECEDING_CONTEXT_LINES = 7;
 
+// Only a failure that actually implicates the cached-content reference (e.g.
+// an expired/deleted cache) should drop a role's cache for the rest of the
+// session. Any other failure — a rate limit, a network blip, a malformed
+// response — is transient and unrelated to the cache's validity; treating it
+// as a cache failure would needlessly force every subsequent call for that
+// role onto the slower, uncached (full-instructions-every-time) path.
+function isCacheRelatedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /cache/i.test(message);
+}
+
 export interface WsServerDeps {
   httpServer: HttpServer;
   session: Session;
@@ -354,8 +365,8 @@ async function translateWithFallback(
   const provider = deps.session.providers!.translation;
   try {
     return await provider.translate(english, activeLanguages, precedingContext, deps.session.roleCaches.translation);
-  } catch {
-    deps.session.roleCaches.translation = null;
+  } catch (error) {
+    if (isCacheRelatedError(error)) deps.session.roleCaches.translation = null;
     try {
       return await provider.translate(english, activeLanguages, precedingContext, null);
     } catch (secondError) {
@@ -378,8 +389,8 @@ async function verifyTranscriptionWithRetry(
   const cacheRef = deps.session.roleCaches.transcriptionVerifier;
   try {
     return await provider.verifyTranscription(english, precedingContext, cacheRef);
-  } catch {
-    deps.session.roleCaches.transcriptionVerifier = null;
+  } catch (error) {
+    if (isCacheRelatedError(error)) deps.session.roleCaches.transcriptionVerifier = null;
     try {
       return await provider.verifyTranscription(english, precedingContext, null);
     } catch (secondError) {
@@ -402,8 +413,8 @@ async function verifyTranslationsWithRetry(
   const cacheRef = deps.session.roleCaches.translationVerifier;
   try {
     return await provider.verifyTranslations(items, cacheRef);
-  } catch {
-    deps.session.roleCaches.translationVerifier = null;
+  } catch (error) {
+    if (isCacheRelatedError(error)) deps.session.roleCaches.translationVerifier = null;
     try {
       return await provider.verifyTranslations(items, null);
     } catch (secondError) {

@@ -11,7 +11,13 @@ import {
 import { logEvent } from './logger.js';
 
 const CACHE_TTL = '7200s';
-const MIN_CACHEABLE_CHARS = 200;
+// Gemini's context-caching API rejects anything under 1024 tokens (400
+// INVALID_ARGUMENT). This app's English prose runs ~4.3-4.4 chars/token in
+// practice (measured from production logs); 4.5 chars/token is used here as
+// a conservative per-token estimate so a role's fixed-rules-and-notes text
+// (with no sermon doc uploaded, typically 200-350 real tokens) is skipped
+// up front rather than sent to the API and rejected every session.
+const MIN_CACHEABLE_CHARS = 1024 * 4.5;
 
 export interface RoleCaches {
   transcriptionVerifier: SermonCacheRef | null;

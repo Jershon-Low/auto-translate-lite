@@ -54,6 +54,15 @@ function fakeFeedbackStore(text = ''): FeedbackStore {
   return { read: vi.fn().mockResolvedValue(text), write: vi.fn().mockResolvedValue(undefined) };
 }
 
+// Gemini rejects context caches under 1024 tokens (~4.5 chars/token for this
+// app's prose, see sermonCache.ts). Fixed rules + notes alone fall well
+// short of that, so most of these tests — which are about wiring session
+// caches through wsServer, not about the size threshold itself — need a
+// stand-in for "a real church uploaded sermon material" to get a cache
+// created at all. The threshold behavior itself is covered in
+// sermonCache.test.ts.
+const CACHE_PADDING = 'Today we talk about faith and hope in difficult times. '.repeat(100);
+
 function fakeCostTracker(): CostTracker & { listeners: Set<(sessionUsd: number, lifetimeUsd: number) => void> } {
   let sessionUsd = 0;
   let lifetimeUsd = 0;
@@ -118,7 +127,7 @@ describe('wsServer', () => {
 
     geminiClient = fakeGeminiClient();
     sermonDocStore = createSermonDocStore();
-    feedbackStore = fakeFeedbackStore();
+    feedbackStore = fakeFeedbackStore(CACHE_PADDING);
     costTracker = fakeCostTracker();
 
     attachWsServer({
@@ -438,7 +447,7 @@ describe('wsServer', () => {
   });
 
   describe('per-role context caching', () => {
-    it('creates a cache for every role on start, even with no sermon document uploaded, since fixed rules + notes are always cacheable', async () => {
+    it('creates a cache for every role on start once there is enough sermon material to clear Gemini\'s 1024-token cache minimum', async () => {
       const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
@@ -452,10 +461,24 @@ describe('wsServer', () => {
       captureSocket.close();
     });
 
+    it('skips cache creation for every role — without ever calling Gemini — when there is no sermon document or feedback text, since fixed rules + notes alone fall well under the 1024-token minimum', async () => {
+      (feedbackStore.read as ReturnType<typeof vi.fn>).mockResolvedValue('');
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      expect(geminiClient.caches.create).not.toHaveBeenCalled();
+      expect(session.roleCaches).toEqual({ transcriptionVerifier: null, translation: null, translationVerifier: null });
+
+      captureSocket.close();
+    });
+
     it('passes the translation role\'s cache to translation calls', async () => {
-      sermonDocStore.set('This week: the story of Cain and Abel.');
+      sermonDocStore.set(`This week: the story of Cain and Abel. ${CACHE_PADDING}`);
       (feedbackStore.read as ReturnType<typeof vi.fn>).mockResolvedValue(
-        'Cain should translate to 该隐 in Chinese'
+        `Cain should translate to 该隐 in Chinese. ${CACHE_PADDING}`
       );
 
       const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
@@ -567,6 +590,56 @@ describe('wsServer', () => {
       const translateCallsAfter = (geminiClient.models.generateContent as any).mock.calls.filter(isTranslateCall);
       expect(translateCallsAfter).toHaveLength(3);
       expect(translateCallsAfter[2][0].config).not.toHaveProperty('cachedContent');
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('keeps the translation cache after a non-cache transient error (e.g. rate limiting)', async () => {
+      let translateCallCount = 0;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":""}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: '' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        translateCallCount += 1;
+        if (translateCallCount === 1) {
+          return Promise.reject(new Error('429 Too Many Requests'));
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('Cain killed Abel');
+      await captionPromise;
+
+      // A rate-limit blip on this one call shouldn't be treated as evidence
+      // the cache itself is stale — unlike the 'cachedContent reference
+      // expired' cases above, the cache is fine and must survive for the
+      // next segment.
+      expect(session.roleCaches.translation).toEqual({ name: 'cachedContents/test' });
+
+      const captionPromise2 = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('A later segment');
+      await captionPromise2;
+
+      const translateCallsAfter = (geminiClient.models.generateContent as any).mock.calls.filter(isTranslateCall);
+      expect(translateCallsAfter[2][0].config.cachedContent).toBe('cachedContents/test');
 
       captureSocket.close();
       viewerSocket.close();
