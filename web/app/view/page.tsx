@@ -221,7 +221,10 @@ function ViewerPageContent() {
             <div key={line.id} className="flex items-start gap-2">
               <div className="flex-1 min-w-0">
                 <p className="text-sm text-muted-foreground">{line.english}</p>
-                <p className="text-xl">{line.translated}</p>
+                <p className={`text-xl ${line.flagged ? 'text-rose-600 dark:text-rose-400' : ''}`}>{line.translated}</p>
+                {line.flagged && line.reason && (
+                  <p className="text-xs text-rose-600/80 dark:text-rose-400/80">{line.reason}</p>
+                )}
               </div>
               {renderLineFeedback(index, line)}
             </div>

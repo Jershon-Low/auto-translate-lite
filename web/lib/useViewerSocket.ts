@@ -7,6 +7,8 @@ export interface CaptionLine {
   english: string;
   translated: string;
   removed?: boolean;
+  flagged?: boolean;
+  reason?: string;
 }
 
 export type ViewerStatus = 'connecting' | 'reconnecting' | 'live';
@@ -37,7 +39,12 @@ export function useViewerSocket(language: string, wsUrl: string) {
         } else if (message.type === 'caption') {
           setLines((previous) => [
             ...previous,
-            { id: message.id, english: message.english, translated: message.translated },
+            {
+              id: message.id,
+              english: message.english,
+              translated: message.translated,
+              ...(message.flagged ? { flagged: true, reason: message.reason } : {}),
+            },
           ]);
           setStatus('live');
         } else if (message.type === 'line-removed') {
@@ -53,7 +60,12 @@ export function useViewerSocket(language: string, wsUrl: string) {
         } else if (message.type === 'caption-inserted') {
           setLines((previous) => {
             const index = previous.findIndex((line) => line.id === message.id);
-            const inserted = { id: message.id, english: message.english, translated: message.translated };
+            const inserted = {
+              id: message.id,
+              english: message.english,
+              translated: message.translated,
+              ...(message.flagged ? { flagged: true, reason: message.reason } : {}),
+            };
             if (index === -1) return [...previous, inserted];
             const next = [...previous];
             next[index] = inserted;
