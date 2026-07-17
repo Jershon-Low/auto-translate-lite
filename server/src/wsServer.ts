@@ -55,7 +55,8 @@ export function attachWsServer(deps: WsServerDeps): void {
 
 function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
   let deepgramConnection: DeepgramConnection | null = null;
-  let processingQueue: Promise<void> = Promise.resolve();
+  let ingestQueue: Promise<void> = Promise.resolve();
+  let publishQueue: Promise<void> = Promise.resolve();
   let recordingStartedAt: number | null = null;
   let unsubscribeCost: (() => void) | null = null;
 
@@ -65,6 +66,40 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
       deps.costTracker.recordDeepgramSeconds(elapsedSeconds);
       recordingStartedAt = null;
     }
+  }
+
+  // Fires the translate call immediately (so multiple lines' calls can run
+  // concurrently, bounded by GeminiCallLimiter), but only lets its result
+  // reach viewers once every earlier-queued line has already been published —
+  // so captions stay in original order even though the network calls overlap.
+  function enqueuePublish(
+    line: CaptionLine,
+    workPromise: Promise<Record<string, string>>,
+    viewerMessageType: 'caption' | 'caption-inserted' = 'caption'
+  ): void {
+    publishQueue = publishQueue
+      .then(async () => {
+        const translations = await workPromise;
+        await finishPublishing(line, translations, deps, viewerMessageType);
+      })
+      .catch((error) => {
+        void logEvent('error', {
+          event: 'publish_failed',
+          english: line.english,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+
+  // For lines not yet visible to viewers (AI-flagged or manual-hold): warms
+  // pendingTranslations in the background so an operator's later Approve can
+  // often skip re-translating, without blocking the ingest queue or being
+  // ordered against any other line's publish.
+  function schedulePrefetch(line: CaptionLine, precedingContext: string[]): void {
+    const activeLanguages = deps.session.getActiveLanguages();
+    void translateWithFallback(deps, line.english, activeLanguages, precedingContext).then((translations) => {
+      line.pendingTranslations = translations;
+    });
   }
 
   ws.on('message', (data, isBinary) => {
@@ -99,8 +134,8 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
 
             deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
               onFinalSegment: (text) => {
-                processingQueue = processingQueue
-                  .then(() => handleFinalSegment(text, deps, ws))
+                ingestQueue = ingestQueue
+                  .then(() => handleFinalSegmentFast(text, deps, ws, enqueuePublish, schedulePrefetch))
                   .catch((error) => {
                     void logEvent('error', {
                       event: 'segment_processing_failed',
@@ -133,7 +168,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             unsubscribeCost?.();
             unsubscribeCost = null;
           } else if (message.type === 'reinstate') {
-            processingQueue = processingQueue
+            ingestQueue = ingestQueue
               .then(() => handleReinstate(message.id, message.english, deps, ws))
               .catch((error) => {
                 void logEvent('error', {
@@ -143,7 +178,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                 });
               });
           } else if (message.type === 'admin-remove') {
-            processingQueue = processingQueue
+            ingestQueue = ingestQueue
               .then(() => handleAdminRemove(message.id, deps, ws))
               .catch((error) => {
                 void logEvent('error', {
@@ -288,26 +323,32 @@ async function handleAdminRemove(id: string, deps: WsServerDeps, captureSocket: 
   }
 }
 
-async function handleFinalSegment(
+type EnqueuePublish = (
+  line: CaptionLine,
+  workPromise: Promise<Record<string, string>>,
+  viewerMessageType?: 'caption' | 'caption-inserted'
+) => void;
+
+async function handleFinalSegmentFast(
   english: string,
   deps: WsServerDeps,
-  captureSocket: WebSocket
+  captureSocket: WebSocket,
+  enqueuePublish: EnqueuePublish,
+  schedulePrefetch: (line: CaptionLine, precedingContext: string[]) => void
 ): Promise<void> {
   const recentLines = deps.session.buffer.getRecent();
   const precedingContext = recentLines
     .filter((recentLine) => !recentLine.suppressed)
     .slice(-PRECEDING_CONTEXT_LINES)
     .map((recentLine) => recentLine.english);
-  const activeLanguages = deps.session.getActiveLanguages();
 
-  const [transcriptionResult, translations] = await Promise.all([
-    verifyTranscriptionWithRetry(deps, english, precedingContext),
-    translateWithFallback(deps, english, activeLanguages, precedingContext),
-  ]);
-
+  const transcriptionResult = await verifyTranscriptionWithRetry(deps, english, precedingContext);
   const manualHold = deps.session.mode === 'manual';
+  const suppressed = manualHold || !transcriptionResult.safe;
 
-  if (!transcriptionResult.safe || manualHold) {
+  const line = deps.session.buffer.append(english, Date.now(), suppressed);
+
+  if (suppressed) {
     if (!transcriptionResult.safe) {
       void logEvent('warn', { event: 'transcription_flagged', english, reason: transcriptionResult.reason });
     }
@@ -316,7 +357,6 @@ async function handleFinalSegment(
         ? 'Pending manual approval'
         : `Pending manual approval — AI also flagged: ${transcriptionResult.reason}`
       : transcriptionResult.reason;
-    const line = deps.session.buffer.append(english, Date.now(), true, translations);
     captureSocket.send(
       JSON.stringify({
         type: 'transcript',
@@ -331,12 +371,14 @@ async function handleFinalSegment(
     for (const viewerSocket of deps.session.getAllViewers()) {
       viewerSocket.send(removedPayload);
     }
+    schedulePrefetch(line, precedingContext);
     return;
   }
 
-  const line = deps.session.buffer.append(english);
   captureSocket.send(JSON.stringify({ type: 'transcript', id: line.id, english: line.english }));
-  await finishPublishing(line, translations, deps);
+  const activeLanguages = deps.session.getActiveLanguages();
+  const workPromise = translateWithFallback(deps, english, activeLanguages, precedingContext);
+  enqueuePublish(line, workPromise);
 }
 
 async function translateWithFallback(
