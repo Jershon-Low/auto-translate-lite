@@ -17,6 +17,12 @@ import { logEvent } from './logger.js';
 
 const PRECEDING_CONTEXT_LINES = 7;
 
+type EnqueuePublish = (
+  line: CaptionLine,
+  workPromise: Promise<Record<string, string>>,
+  viewerMessageType?: 'caption' | 'caption-inserted'
+) => void;
+
 export interface WsServerDeps {
   httpServer: HttpServer;
   session: Session;
@@ -232,6 +238,12 @@ async function finishPublishing(
   deps: WsServerDeps,
   viewerMessageType: 'caption' | 'caption-inserted' = 'caption'
 ): Promise<void> {
+  // The line may have been admin-removed (or otherwise suppressed) after it
+  // was handed to enqueuePublish but before its translate work resolved.
+  // Skip the publish entirely in that case — the viewer already got (or
+  // will get) a line-removed broadcast for it.
+  if (line.suppressed) return;
+
   const activeLanguages = deps.session.getActiveLanguages();
   if (activeLanguages.length === 0) return;
 
@@ -339,12 +351,6 @@ async function handleAdminRemove(id: string, deps: WsServerDeps, captureSocket: 
     viewerSocket.send(removedPayload);
   }
 }
-
-type EnqueuePublish = (
-  line: CaptionLine,
-  workPromise: Promise<Record<string, string>>,
-  viewerMessageType?: 'caption' | 'caption-inserted'
-) => void;
 
 async function handleFinalSegmentFast(
   english: string,

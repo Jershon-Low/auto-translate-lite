@@ -1594,6 +1594,63 @@ describe('wsServer', () => {
       captureSocket.close();
       viewerSocket.close();
     });
+
+    it('does not publish a caption to viewers for a line admin-removed while its translate call was still pending', async () => {
+      let resolveTranslate!: (value: { text: string }) => void;
+      const pendingTranslate = new Promise<{ text: string }>((resolve) => {
+        resolveTranslate = resolve;
+      });
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        return pendingTranslate;
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const viewerMessages: any[] = [];
+      viewerSocket.on('message', (data) => viewerMessages.push(JSON.parse(data.toString())));
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const transcript = await transcriptPromise;
+
+      // The line's translate call is still in flight (pendingTranslate is
+      // unresolved) when the operator admin-removes it.
+      const removeAckPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: transcript.id }));
+      await removeAckPromise;
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(viewerMessages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+
+      // Now let the deferred translate resolve. The queued publish must be
+      // skipped since the line was suppressed in the meantime.
+      resolveTranslate({ text: '{"zh":"你好"}' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(viewerMessages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+      expect(viewerMessages.some((message) => message.type === 'caption')).toBe(false);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
   });
 
   describe('manual approval mode', () => {
