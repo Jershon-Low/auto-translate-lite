@@ -1026,6 +1026,71 @@ describe('wsServer', () => {
       return { id: transcript.id, english: transcript.english };
     }
 
+    it("does not block the ingest queue on reinstate's translate call in manual mode", async () => {
+      let resolveReinstateTranslate!: (value: { text: string }) => void;
+      const heldTranslate = new Promise<{ text: string }>((resolve) => {
+        resolveReinstateTranslate = resolve;
+      });
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((match) => match[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        if (params.contents.includes('Sentence: "Edited line"')) return heldTranslate;
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      // A subscribed viewer is required so activeLanguages is non-empty —
+      // translateWithFallback short-circuits without calling Gemini at all
+      // when there are zero active languages, which would make heldTranslate
+      // irrelevant and defeat the point of this test.
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+      // set-mode has no ack message, so give the real socket I/O a tick to
+      // land before triggering onFinalSegment directly (see the same wait
+      // used throughout the "manual approval mode" describe block below).
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const pendingAckPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Original line');
+      const pendingAck = await pendingAckPromise;
+      expect(pendingAck).toMatchObject({ type: 'transcript', english: 'Original line', flagged: true, pending: true });
+
+      // Approve with edited text (the operator corrected the transcription
+      // before pressing Enter) — this always pays a fresh, uncached translate
+      // call, which is the case that used to stall the queue.
+      const reinstateAckPromise = waitForMessage(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'reinstate', id: pendingAck.id, english: 'Edited line' }));
+      const reinstateAck = await reinstateAckPromise;
+      expect(reinstateAck).toEqual({ type: 'transcript', id: pendingAck.id, english: 'Edited line' });
+
+      // The reinstate's translate call (heldTranslate) is still pending. The
+      // ingest queue must still process a new segment without waiting on it.
+      const nextAckPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Next segment');
+      const nextAck = await nextAckPromise;
+      expect(nextAck).toMatchObject({ english: 'Next segment' });
+
+      resolveReinstateTranslate({ text: '{"zh":"编辑后的行"}' });
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
     it('reinstates with unedited text: un-flags the capture line and broadcasts caption-inserted', async () => {
       const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
       await waitForOpen(captureSocket);

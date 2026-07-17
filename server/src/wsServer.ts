@@ -169,7 +169,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             unsubscribeCost = null;
           } else if (message.type === 'reinstate') {
             ingestQueue = ingestQueue
-              .then(() => handleReinstate(message.id, message.english, deps, ws))
+              .then(() => handleReinstateFast(message.id, message.english, deps, ws, enqueuePublish))
               .catch((error) => {
                 void logEvent('error', {
                   event: 'reinstate_processing_failed',
@@ -260,11 +260,33 @@ async function finishPublishing(
   }
 }
 
-async function handleReinstate(
+function buildReinstateTranslation(
+  deps: WsServerDeps,
+  trimmed: string,
+  originalEnglish: string,
+  cachedTranslations: Record<string, string>,
+  precedingContext: string[],
+  activeLanguages: string[]
+): Promise<Record<string, string>> {
+  if (trimmed !== originalEnglish) {
+    return translateWithFallback(deps, trimmed, activeLanguages, precedingContext);
+  }
+  const cachedLanguages = activeLanguages.filter((language) => cachedTranslations[language] !== undefined);
+  const newLanguages = activeLanguages.filter((language) => cachedTranslations[language] === undefined);
+  const cachedEntries = Object.fromEntries(cachedLanguages.map((language) => [language, cachedTranslations[language]]));
+  if (newLanguages.length === 0) return Promise.resolve(cachedEntries);
+  return translateWithFallback(deps, trimmed, newLanguages, precedingContext).then((fresh) => ({
+    ...cachedEntries,
+    ...fresh,
+  }));
+}
+
+async function handleReinstateFast(
   id: string,
   english: string,
   deps: WsServerDeps,
-  captureSocket: WebSocket
+  captureSocket: WebSocket,
+  enqueuePublish: EnqueuePublish
 ): Promise<void> {
   const trimmed = english.trim();
   if (trimmed.length === 0) {
@@ -283,20 +305,6 @@ async function handleReinstate(
   const precedingContext = deps.session.buffer.precedingContextFor(id, PRECEDING_CONTEXT_LINES);
   const activeLanguages = deps.session.getActiveLanguages();
 
-  let translations: Record<string, string>;
-  if (trimmed === originalEnglish) {
-    const cachedLanguages = activeLanguages.filter((language) => cachedTranslations[language] !== undefined);
-    const newLanguages = activeLanguages.filter((language) => cachedTranslations[language] === undefined);
-    const freshTranslations =
-      newLanguages.length > 0 ? await translateWithFallback(deps, trimmed, newLanguages, precedingContext) : {};
-    translations = {
-      ...Object.fromEntries(cachedLanguages.map((language) => [language, cachedTranslations[language]])),
-      ...freshTranslations,
-    };
-  } else {
-    translations = await translateWithFallback(deps, trimmed, activeLanguages, precedingContext);
-  }
-
   const line = deps.session.buffer.reinstate(id, trimmed);
   if (line === null) {
     captureSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'not found' }));
@@ -304,7 +312,16 @@ async function handleReinstate(
   }
 
   captureSocket.send(JSON.stringify({ type: 'transcript', id: line.id, english: line.english }));
-  await finishPublishing(line, translations, deps, 'caption-inserted');
+
+  const workPromise = buildReinstateTranslation(
+    deps,
+    trimmed,
+    originalEnglish,
+    cachedTranslations,
+    precedingContext,
+    activeLanguages
+  );
+  enqueuePublish(line, workPromise, 'caption-inserted');
 }
 
 async function handleAdminRemove(id: string, deps: WsServerDeps, captureSocket: WebSocket): Promise<void> {
