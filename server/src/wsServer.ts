@@ -195,11 +195,8 @@ async function finishPublishing(
   line: CaptionLine,
   translations: Record<string, string>,
   deps: WsServerDeps,
-  captureSocket: WebSocket,
   viewerMessageType: 'caption' | 'caption-inserted' = 'caption'
 ): Promise<void> {
-  captureSocket.send(JSON.stringify({ type: 'transcript', id: line.id, english: line.english }));
-
   const activeLanguages = deps.session.getActiveLanguages();
   if (activeLanguages.length === 0) return;
 
@@ -271,7 +268,8 @@ async function handleReinstate(
     return;
   }
 
-  await finishPublishing(line, translations, deps, captureSocket, 'caption-inserted');
+  captureSocket.send(JSON.stringify({ type: 'transcript', id: line.id, english: line.english }));
+  await finishPublishing(line, translations, deps, 'caption-inserted');
 }
 
 async function handleAdminRemove(id: string, deps: WsServerDeps, captureSocket: WebSocket): Promise<void> {
@@ -337,7 +335,8 @@ async function handleFinalSegment(
   }
 
   const line = deps.session.buffer.append(english);
-  await finishPublishing(line, translations, deps, captureSocket);
+  captureSocket.send(JSON.stringify({ type: 'transcript', id: line.id, english: line.english }));
+  await finishPublishing(line, translations, deps);
 }
 
 async function translateWithFallback(
