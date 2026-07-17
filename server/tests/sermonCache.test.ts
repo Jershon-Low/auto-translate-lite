@@ -23,9 +23,9 @@ function fakeClientWithCaches(): GeminiClient {
 }
 
 const modelConfig: ModelConfig = {
-  transcriptionVerifier: 'gemini-3.1-flash-lite',
-  translation: 'gemini-3.5-flash',
-  translationVerifier: 'gemini-3.1-flash-lite',
+  transcriptionVerifier: { provider: 'gemini', model: 'gemini-3.1-flash-lite' },
+  translation: { provider: 'gemini', model: 'gemini-3.5-flash' },
+  translationVerifier: { provider: 'gemini', model: 'gemini-3.1-flash-lite' },
 };
 
 const promptConfig: PromptConfig = {
@@ -107,6 +107,21 @@ describe('createRoleCaches', () => {
     expect(caches.translationVerifier).not.toBeNull();
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+
+  it("skips Gemini cache creation for a role configured to use OpenRouter, returning null for that role without calling client.caches.create", async () => {
+    const client = fakeClientWithCaches();
+    const mixedModelConfig: ModelConfig = {
+      transcriptionVerifier: { provider: 'openrouter', model: 'qwen/qwen3.6-flash' },
+      translation: { provider: 'gemini', model: 'gemini-3.5-flash' },
+      translationVerifier: { provider: 'gemini', model: 'gemini-3.1-flash-lite' },
+    };
+    const caches = await createRoleCaches(client, mixedModelConfig, promptConfig, '', PADDING);
+    expect(caches.transcriptionVerifier).toBeNull();
+    expect(caches.translation).not.toBeNull();
+    expect(caches.translationVerifier).not.toBeNull();
+    const createCalls = (client.caches.create as any).mock.calls.map((call: any) => call[0].model);
+    expect(createCalls).toEqual(['gemini-3.5-flash', 'gemini-3.1-flash-lite']);
   });
 });
 
