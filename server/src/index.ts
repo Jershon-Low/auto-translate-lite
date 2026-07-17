@@ -11,6 +11,7 @@ import { createViewerFeedbackStore } from './viewerFeedbackStore.js';
 import { createCostTracker } from './costTracker.js';
 import { createModelConfigStore } from './modelConfigStore.js';
 import { createPromptConfigStore } from './promptConfigStore.js';
+import { createTranslationFlagDisplayStore } from './translationFlagDisplayStore.js';
 import { withCostTracking } from './geminiCostTracking.js';
 import { withGeminiLimiter } from './geminiRateLimiting.js';
 import { GeminiCallLimiter } from './geminiLimiter.js';
@@ -36,6 +37,9 @@ const viewerFeedbackStore = createViewerFeedbackStore(
 );
 const modelConfigStore = createModelConfigStore(process.env.MODEL_CONFIG_FILE_PATH ?? 'data/model-config.json');
 const promptConfigStore = createPromptConfigStore(process.env.PROMPT_CONFIG_FILE_PATH ?? 'data/prompt-config.json');
+const translationFlagDisplayStore = createTranslationFlagDisplayStore(
+  process.env.TRANSLATION_FLAG_DISPLAY_FILE_PATH ?? 'data/translation-flag-display.json'
+);
 
 const app = createApp({
   sermonDocStore,
@@ -44,6 +48,7 @@ const app = createApp({
   session,
   modelConfigStore,
   promptConfigStore,
+  translationFlagDisplayStore,
   adminPasscode: process.env.ADMIN_PASSCODE,
 });
 const httpServer = createServer(app);
@@ -59,6 +64,7 @@ attachWsServer({
   costTracker,
   modelConfigStore,
   promptConfigStore,
+  translationFlagDisplayStore,
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;

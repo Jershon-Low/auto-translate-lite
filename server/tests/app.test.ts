@@ -9,6 +9,10 @@ import { createViewerFeedbackStore } from '../src/viewerFeedbackStore';
 import { Session } from '../src/session';
 import { createModelConfigStore, DEFAULT_MODEL_CONFIG } from '../src/modelConfigStore';
 import { createPromptConfigStore, DEFAULT_PROMPT_CONFIG } from '../src/promptConfigStore';
+import {
+  createTranslationFlagDisplayStore,
+  DEFAULT_TRANSLATION_FLAG_DISPLAY_CONFIG,
+} from '../src/translationFlagDisplayStore';
 
 vi.mock('../src/docExtraction', () => ({
   extractDocumentText: vi.fn().mockResolvedValue('Extracted sermon text'),
@@ -26,6 +30,9 @@ function testDeps() {
     session: new Session(),
     modelConfigStore: createModelConfigStore(join(tmpdir(), `model-config-app-test-${Date.now()}-${Math.random()}.json`)),
     promptConfigStore: createPromptConfigStore(join(tmpdir(), `prompt-config-app-test-${Date.now()}-${Math.random()}.json`)),
+    translationFlagDisplayStore: createTranslationFlagDisplayStore(
+      join(tmpdir(), `translation-flag-display-app-test-${Date.now()}-${Math.random()}.json`)
+    ),
     adminPasscode: 'test-passcode',
   };
 }
@@ -315,5 +322,52 @@ describe('GET/PUT /admin/prompt-config', () => {
       .set('x-admin-passcode', 'test-passcode')
       .send({ transcriptionVerifier: 'a', translation: 'b' });
     expect(response.status).toBe(400);
+  });
+});
+
+describe('GET/PUT /admin/translation-flag-display', () => {
+  it('returns 401 without the admin passcode header', async () => {
+    const response = await request(createApp(testDeps())).get('/admin/translation-flag-display');
+    expect(response.status).toBe(401);
+  });
+
+  it('returns the default config (hide) on first read', async () => {
+    const response = await request(createApp(testDeps()))
+      .get('/admin/translation-flag-display')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(DEFAULT_TRANSLATION_FLAG_DISPLAY_CONFIG);
+  });
+
+  it('saves a valid config and returns it on a subsequent read', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+
+    const putResponse = await request(app)
+      .put('/admin/translation-flag-display')
+      .set('x-admin-passcode', 'test-passcode')
+      .send({ mode: 'flag' });
+    expect(putResponse.status).toBe(200);
+
+    const getResponse = await request(app)
+      .get('/admin/translation-flag-display')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(getResponse.body).toEqual({ mode: 'flag' });
+  });
+
+  it('rejects an invalid mode with 400 and does not persist it', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+
+    const putResponse = await request(app)
+      .put('/admin/translation-flag-display')
+      .set('x-admin-passcode', 'test-passcode')
+      .send({ mode: 'delete-everything' });
+    expect(putResponse.status).toBe(400);
+
+    const getResponse = await request(app)
+      .get('/admin/translation-flag-display')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(getResponse.body).toEqual(DEFAULT_TRANSLATION_FLAG_DISPLAY_CONFIG);
   });
 });

@@ -11,6 +11,10 @@ import { createAdminAuth } from './adminAuth.js';
 import { validateModelConfig, type ModelConfigStore } from './modelConfigStore.js';
 import { validatePromptConfig, type PromptConfigStore } from './promptConfigStore.js';
 import {
+  validateTranslationFlagDisplayConfig,
+  type TranslationFlagDisplayStore,
+} from './translationFlagDisplayStore.js';
+import {
   TRANSLATION_FIXED_RULES,
   TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO,
   TRANSCRIPTION_VERIFIER_FIXED_RULES_OUTRO,
@@ -25,6 +29,7 @@ export interface AppDeps {
   session: Session;
   modelConfigStore: ModelConfigStore;
   promptConfigStore: PromptConfigStore;
+  translationFlagDisplayStore: TranslationFlagDisplayStore;
   adminPasscode: string | undefined;
 }
 
@@ -157,6 +162,20 @@ export function createApp(deps: AppDeps): Express {
       return;
     }
     await deps.promptConfigStore.write(config);
+    res.json({ ok: true });
+  });
+
+  app.get('/admin/translation-flag-display', adminAuth, async (_req, res) => {
+    res.json(await deps.translationFlagDisplayStore.read());
+  });
+
+  app.put('/admin/translation-flag-display', adminAuth, async (req, res) => {
+    const config = validateTranslationFlagDisplayConfig(req.body);
+    if (!config) {
+      res.status(400).json({ error: 'Invalid translation flag display config: mode must be "hide" or "flag"' });
+      return;
+    }
+    await deps.translationFlagDisplayStore.write(config);
     res.json({ ok: true });
   });
 
