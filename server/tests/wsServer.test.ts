@@ -11,6 +11,10 @@ import type { FeedbackStore } from '../src/feedbackStore';
 import type { CostTracker } from '../src/costTracker';
 import { DEFAULT_MODEL_CONFIG, type ModelConfigStore } from '../src/modelConfigStore';
 import { DEFAULT_PROMPT_CONFIG, type PromptConfigStore } from '../src/promptConfigStore';
+import {
+  DEFAULT_TRANSLATION_FLAG_DISPLAY_CONFIG,
+  type TranslationFlagDisplayStore,
+} from '../src/translationFlagDisplayStore';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -95,6 +99,13 @@ function fakePromptConfigStore(): PromptConfigStore {
   return { read: vi.fn().mockResolvedValue(DEFAULT_PROMPT_CONFIG), write: vi.fn().mockResolvedValue(undefined) };
 }
 
+function fakeTranslationFlagDisplayStore(): TranslationFlagDisplayStore {
+  return {
+    read: vi.fn().mockResolvedValue(DEFAULT_TRANSLATION_FLAG_DISPLAY_CONFIG),
+    write: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
 function isTranslateCall(call: any): boolean {
   const contents = call[0].contents as string;
   return !contents.includes('safety checker') && !contents.includes('transcription accuracy checker');
@@ -119,6 +130,7 @@ describe('wsServer', () => {
   let sermonDocStore: SermonDocStore;
   let feedbackStore: FeedbackStore;
   let costTracker: ReturnType<typeof fakeCostTracker>;
+  let translationFlagDisplayStore: TranslationFlagDisplayStore;
 
   beforeEach(async () => {
     session = new Session();
@@ -129,6 +141,7 @@ describe('wsServer', () => {
     sermonDocStore = createSermonDocStore();
     feedbackStore = fakeFeedbackStore(CACHE_PADDING);
     costTracker = fakeCostTracker();
+    translationFlagDisplayStore = fakeTranslationFlagDisplayStore();
 
     attachWsServer({
       httpServer,
@@ -144,6 +157,7 @@ describe('wsServer', () => {
       costTracker,
       modelConfigStore: fakeModelConfigStore(),
       promptConfigStore: fakePromptConfigStore(),
+      translationFlagDisplayStore,
     });
 
     await new Promise<void>((resolve) => httpServer.listen(0, resolve));
@@ -1550,6 +1564,128 @@ describe('wsServer', () => {
       captureSocket.close();
       firstViewer.close();
       secondViewer.close();
+    });
+  });
+
+  describe('unsafe translation display mode', () => {
+    it('flag mode: sends the real translation marked flagged with the reason, and a later viewer sees it in backlog too', async () => {
+      (translationFlagDisplayStore.read as ReturnType<typeof vi.fn>).mockResolvedValue({ mode: 'flag' });
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: '{"zh":{"safe":false,"reason":"polarity flip"}}' });
+        }
+        return Promise.resolve({ text: '{"zh":"耶稣不爱你"}' });
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const firstViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(firstViewer);
+      firstViewer.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(firstViewer); // backlog: []
+
+      const captionPromise = waitForMessage(firstViewer);
+      capturedCallbacks!.onFinalSegment('Jesus loves you');
+      const caption = await captionPromise;
+
+      expect(caption).toEqual({
+        type: 'caption',
+        id: expect.any(String),
+        english: 'Jesus loves you',
+        translated: '耶稣不爱你',
+        flagged: true,
+        reason: 'polarity flip',
+      });
+      expect(session.translationCache.get('zh', caption.id)).toEqual({
+        translated: '耶稣不爱你',
+        flagged: true,
+        reason: 'polarity flip',
+      });
+
+      const secondViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(secondViewer);
+      secondViewer.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      const backlogMessage = await waitForMessage(secondViewer);
+
+      expect(backlogMessage).toEqual({
+        type: 'backlog',
+        lines: [
+          { id: caption.id, english: 'Jesus loves you', translated: '耶稣不爱你', flagged: true, reason: 'polarity flip' },
+        ],
+      });
+
+      warnSpy.mockRestore();
+      captureSocket.close();
+      firstViewer.close();
+      secondViewer.close();
+    });
+
+    it('flag mode: a safe translation is delivered exactly as in hide mode, with no flagged/reason fields', async () => {
+      (translationFlagDisplayStore.read as ReturnType<typeof vi.fn>).mockResolvedValue({ mode: 'flag' });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const caption = await captionPromise;
+
+      expect(caption).toEqual({ type: 'caption', id: expect.any(String), english: 'Hello everyone', translated: '你好' });
+      expect(caption).not.toHaveProperty('flagged');
+      expect(session.translationCache.get('zh', caption.id)).toEqual({ translated: '你好', flagged: false });
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('flag mode: an unsafe backlog-fill translation is cached flagged and delivered with the reason', async () => {
+      (translationFlagDisplayStore.read as ReturnType<typeof vi.fn>).mockResolvedValue({ mode: 'flag' });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const line = session.buffer.append('Jesus loves you', Date.now());
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: JSON.stringify({ [line.id]: { safe: false, reason: 'polarity flip' } }) });
+        }
+        return Promise.resolve({ text: '{"translations":["耶稣不爱你"]}' });
+      });
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      const backlogMessage = await waitForMessage(viewerSocket);
+
+      expect(backlogMessage).toEqual({
+        type: 'backlog',
+        lines: [{ id: line.id, english: 'Jesus loves you', translated: '耶稣不爱你', flagged: true, reason: 'polarity flip' }],
+      });
+      expect(session.translationCache.get('zh', line.id)).toEqual({
+        translated: '耶稣不爱你',
+        flagged: true,
+        reason: 'polarity flip',
+      });
+
+      captureSocket.close();
+      viewerSocket.close();
     });
   });
 

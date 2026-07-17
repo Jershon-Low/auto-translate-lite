@@ -96,6 +96,13 @@ describe('Session', () => {
     expect(session.inFlightFills.size).toBe(0);
   });
 
+  it('start() resets translationFlagDisplayMode to the default (hide)', () => {
+    const session = new Session();
+    session.translationFlagDisplayMode = 'flag';
+    session.start();
+    expect(session.translationFlagDisplayMode).toBe('hide');
+  });
+
   it('defaults mode to automatic', () => {
     const session = new Session();
     expect(session.mode).toBe('automatic');

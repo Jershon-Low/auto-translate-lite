@@ -13,6 +13,7 @@ import type { FeedbackStore } from './feedbackStore.js';
 import type { CostTracker } from './costTracker.js';
 import type { ModelConfigStore } from './modelConfigStore.js';
 import type { PromptConfigStore } from './promptConfigStore.js';
+import type { TranslationFlagDisplayStore } from './translationFlagDisplayStore.js';
 import { logEvent } from './logger.js';
 
 const PRECEDING_CONTEXT_LINES = 7;
@@ -45,6 +46,7 @@ export interface WsServerDeps {
   costTracker: CostTracker;
   modelConfigStore: ModelConfigStore;
   promptConfigStore: PromptConfigStore;
+  translationFlagDisplayStore: TranslationFlagDisplayStore;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
@@ -131,6 +133,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             const feedbackText = await deps.feedbackStore.read();
             const modelConfig = await deps.modelConfigStore.read();
             const promptConfig = await deps.promptConfigStore.read();
+            const translationFlagDisplayConfig = await deps.translationFlagDisplayStore.read();
 
             deps.session.providers = {
               transcriptionVerifier: getProvider(modelConfig.transcriptionVerifier, promptConfig.transcriptionVerifier, deps.geminiClient),
@@ -138,6 +141,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
               translationVerifier: getProvider(modelConfig.translationVerifier, promptConfig.translationVerifier, deps.geminiClient),
             };
             deps.session.roleCaches = await createRoleCaches(deps.geminiClient, modelConfig, promptConfig, feedbackText, sermonText);
+            deps.session.translationFlagDisplayMode = translationFlagDisplayConfig.mode;
 
             void logEvent('info', {
               event: 'session_context_cache',
@@ -262,6 +266,7 @@ async function finishPublishing(
     .filter((language) => Boolean(translations[language]))
     .map((language) => ({ id: language, english: line.english, translated: translations[language] }));
   const verifications = await verifyTranslationsWithRetry(deps, verificationItems);
+  const flagMode = deps.session.translationFlagDisplayMode === 'flag';
 
   for (const language of activeLanguages) {
     const translated = translations[language];
@@ -269,14 +274,27 @@ async function finishPublishing(
 
     const verification = verifications[language];
     const safe = verification?.safe === true;
-    const outgoing = safe ? translated : line.english;
-    deps.session.translationCache.set(language, line.id, { translated: outgoing, flagged: false });
+    const outgoing = flagMode || safe ? translated : line.english;
+    const flagged = flagMode && !safe;
+    const reason = verification?.reason || 'verification unavailable';
 
     if (!safe) {
-      logTranslationFallback(language, line.english, translated, verification?.reason || 'verification unavailable');
+      logTranslationFallback(language, line.english, translated, reason);
     }
 
-    const payload = JSON.stringify({ type: viewerMessageType, id: line.id, english: line.english, translated: outgoing });
+    deps.session.translationCache.set(
+      language,
+      line.id,
+      flagged ? { translated: outgoing, flagged: true, reason } : { translated: outgoing, flagged: false }
+    );
+
+    const payload = JSON.stringify({
+      type: viewerMessageType,
+      id: line.id,
+      english: line.english,
+      translated: outgoing,
+      ...(flagged ? { flagged: true, reason } : {}),
+    });
     for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
       viewerSocket.send(payload);
     }
@@ -534,6 +552,7 @@ async function ensureBacklogCached(
       .filter((item) => item.translated.length > 0);
     const verifications = await verifyTranslationsWithRetry(deps, verificationItems);
 
+    const flagMode = deps.session.translationFlagDisplayMode === 'flag';
     missingEntries.forEach((line, index) => {
       const translated = translations[index];
       if (!translated) {
@@ -545,8 +564,13 @@ async function ensureBacklogCached(
         cache.set(language, line.id, { translated, flagged: false });
         return;
       }
-      logTranslationFallback(language, line.english, translated, verification?.reason || 'verification unavailable');
-      cache.set(language, line.id, { translated: line.english, flagged: false });
+      const reason = verification?.reason || 'verification unavailable';
+      logTranslationFallback(language, line.english, translated, reason);
+      if (flagMode) {
+        cache.set(language, line.id, { translated, flagged: true, reason });
+      } else {
+        cache.set(language, line.id, { translated: line.english, flagged: false });
+      }
     });
   })();
 
@@ -556,6 +580,21 @@ async function ensureBacklogCached(
   } finally {
     fills.delete(language);
   }
+}
+
+function buildBacklogLine(
+  line: CaptionLine,
+  cache: Session['translationCache'],
+  language: string
+): Record<string, unknown> {
+  if (line.suppressed) return { id: line.id, english: '', translated: '', removed: true };
+  const cached = cache.get(language, line.id);
+  return {
+    id: line.id,
+    english: line.english,
+    translated: cached?.translated ?? line.english,
+    ...(cached?.flagged ? { flagged: true, reason: cached.reason } : {}),
+  };
 }
 
 function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
@@ -575,11 +614,7 @@ function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
             await ensureBacklogCached(deps, language, missingEntries);
           }
 
-          const lines = backlog.map((line) =>
-            line.suppressed
-              ? { id: line.id, english: '', translated: '', removed: true }
-              : { id: line.id, english: line.english, translated: cache.get(language, line.id)?.translated ?? line.english }
-          );
+          const lines = backlog.map((line) => buildBacklogLine(line, cache, language));
 
           ws.send(JSON.stringify({ type: 'backlog', lines }));
           deps.session.addViewer(ws, language);

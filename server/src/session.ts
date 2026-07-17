@@ -4,6 +4,7 @@ import { TranscriptBuffer } from './transcriptBuffer.js';
 import { TranslationCache } from './translationCache.js';
 import type { RoleCaches } from './sermonCache.js';
 import type { RoleProviders } from './llmTypes.js';
+import type { TranslationFlagDisplayMode } from './translationFlagDisplayStore.js';
 
 const EMPTY_ROLE_CACHES: RoleCaches = {
   transcriptionVerifier: null,
@@ -20,6 +21,7 @@ export class Session {
   translationCache: TranslationCache = new TranslationCache();
   inFlightFills: Map<string, Promise<void>> = new Map();
   mode: 'automatic' | 'manual' = 'automatic';
+  translationFlagDisplayMode: TranslationFlagDisplayMode = 'hide';
   private viewers: Map<WebSocket, string> = new Map();
 
   start(): void {
@@ -30,6 +32,7 @@ export class Session {
     this.providers = null;
     this.translationCache = new TranslationCache();
     this.inFlightFills = new Map();
+    this.translationFlagDisplayMode = 'hide';
   }
 
   stop(): void {
