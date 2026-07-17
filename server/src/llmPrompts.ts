@@ -21,3 +21,51 @@ export const TRANSLATION_VERIFIER_FIXED_RULES_OUTRO =
 
 export const TRANSLATION_VERIFIER_DEFAULT_NOTES =
   'Do NOT flag a translation just because it is idiomatic or non-literal — this sermon includes Australian slang, jokes, and dry humor (e.g. "no worries," "arvo," "having a go," "she\'ll be right"), and a natural, non-literal rendering of those is expected and correct.';
+
+function buildTranslateContextBlock(precedingContext: string[]): string {
+  if (precedingContext.length === 0) return '';
+  const numbered = precedingContext.map((line, index) => `${index + 1}. "${line}"`).join('\n');
+  return `For context, here are the immediately preceding sentences from the same sermon (do not translate these — they're for reference only, e.g. to resolve pronouns or match terminology):
+${numbered}
+
+`;
+}
+
+export function buildTranslateTaskText(
+  languageCodes: string[],
+  englishText: string,
+  precedingContext: string[],
+  instructionBlock = ''
+): string {
+  return `Translate the following sentence, spoken during a live Australian church sermon, into each of these language codes: ${languageCodes.join(', ')}. Keep the tone natural and spoken, not overly formal.
+
+${instructionBlock}${buildTranslateContextBlock(precedingContext)}Sentence: "${englishText}"`;
+}
+
+export function buildTranslateBacklogTaskText(englishLines: string[], languageCode: string, instructionBlock = ''): string {
+  return `Translate each of these sentences, spoken during a live Australian church sermon, into language code "${languageCode}". Return the translations in the exact same order as the input.
+
+${instructionBlock}Sentences: ${JSON.stringify(englishLines)}`;
+}
+
+function buildVerifierContextBlock(precedingContext: string[]): string {
+  if (precedingContext.length === 0) return '';
+  const numbered = precedingContext.map((line, index) => `${index + 1}. "${line}"`).join('\n');
+  return `For context, here are the immediately preceding sentences from the same sermon (not to be evaluated themselves — only for resolving pronouns or continuing a thought):\n${numbered}\n\n`;
+}
+
+export function buildTranscriptionVerifierTaskText(english: string, precedingContext: string[]): string {
+  return `${buildVerifierContextBlock(precedingContext)}Line: "${english}"
+
+Return whether it is safe and a short reason.`;
+}
+
+export function buildTranslationVerifierTaskText(items: { id: string; english: string; translated: string }[]): string {
+  const pairs = items
+    .map((item, index) => `${index + 1}. [id: "${item.id}"] English: "${item.english}" | Translation: "${item.translated}"`)
+    .join('\n');
+  return `Pairs:
+${pairs}
+
+Return, for each id, whether it is safe and a short reason.`;
+}

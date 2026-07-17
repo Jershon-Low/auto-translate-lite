@@ -1,15 +1,13 @@
 import { thinkingConfigFor, type GeminiClient, type SermonCacheRef } from './gemini.js';
-import { TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO, TRANSCRIPTION_VERIFIER_FIXED_RULES_OUTRO } from './llmPrompts.js';
+import {
+  TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO,
+  TRANSCRIPTION_VERIFIER_FIXED_RULES_OUTRO,
+  buildTranscriptionVerifierTaskText,
+} from './llmPrompts.js';
 
 export interface TranscriptionCheckResult {
   safe: boolean;
   reason: string;
-}
-
-function buildContextBlock(precedingContext: string[]): string {
-  if (precedingContext.length === 0) return '';
-  const numbered = precedingContext.map((line, index) => `${index + 1}. "${line}"`).join('\n');
-  return `For context, here are the immediately preceding sentences from the same sermon (not to be evaluated themselves — only for resolving pronouns or continuing a thought):\n${numbered}\n\n`;
 }
 
 export async function verifyTranscription(
@@ -33,9 +31,7 @@ export async function verifyTranscription(
 
   const response = await client.models.generateContent({
     model,
-    contents: `${cacheRouterMarker}${instructionBlock}${buildContextBlock(precedingContext)}Line: "${english}"
-
-Return whether it is safe and a short reason.`,
+    contents: `${cacheRouterMarker}${instructionBlock}${buildTranscriptionVerifierTaskText(english, precedingContext)}`,
     config: {
       responseMimeType: 'application/json',
       responseSchema: {
