@@ -6,9 +6,11 @@ export type ModelId = 'gemini-3.1-flash-lite' | 'gemini-3.5-flash';
 
 export const MODEL_IDS: ModelId[] = ['gemini-3.1-flash-lite', 'gemini-3.5-flash'];
 
+export type OpenRouterReasoningEffort = 'off' | 'low' | 'medium' | 'high';
+
 export type RoleModelSelection =
   | { provider: 'gemini'; model: ModelId }
-  | { provider: 'openrouter'; model: string };
+  | { provider: 'openrouter'; model: string; reasoning?: OpenRouterReasoningEffort };
 
 export interface LlmProvider {
   translate(

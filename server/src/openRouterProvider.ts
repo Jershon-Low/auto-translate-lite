@@ -1,5 +1,5 @@
 import type { OpenRouterClient, OpenRouterMessage } from './openRouterClient.js';
-import type { LlmProvider } from './llmTypes.js';
+import type { LlmProvider, OpenRouterReasoningEffort } from './llmTypes.js';
 import type { SermonCacheRef } from './gemini.js';
 import type { TranscriptionCheckResult } from './transcriptionVerifier.js';
 import type { VerificationItem, VerificationResult } from './translationVerifier.js';
@@ -24,7 +24,8 @@ export class OpenRouterProvider implements LlmProvider {
   constructor(
     private readonly client: OpenRouterClient,
     private readonly model: string,
-    private readonly notes: string
+    private readonly notes: string,
+    private readonly reasoning?: OpenRouterReasoningEffort
   ) {}
 
   async translate(
@@ -123,12 +124,15 @@ export class OpenRouterProvider implements LlmProvider {
       { role: 'system', content: [{ type: 'text', text: systemText, cache_control: { type: 'ephemeral' } }] },
       { role: 'user', content: userText },
     ];
+    const reasoningParam =
+      this.reasoning && this.reasoning !== 'off' ? { reasoning: { effort: this.reasoning } } : {};
 
     try {
       const response = await this.client.chat.completions.create({
         model: this.model,
         messages,
         response_format: { type: 'json_schema', json_schema: { name: schemaName, strict: true, schema } },
+        ...reasoningParam,
       });
       return JSON.parse(response.choices[0]?.message.content ?? '{}');
     } catch (error) {
@@ -144,6 +148,7 @@ export class OpenRouterProvider implements LlmProvider {
         model: this.model,
         messages: fallbackMessages,
         response_format: { type: 'json_object' },
+        ...reasoningParam,
       });
       return JSON.parse(response.choices[0]?.message.content ?? '{}');
     }

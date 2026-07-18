@@ -103,6 +103,25 @@ describe('validateModelConfig', () => {
     expect(validateModelConfig(config)).toEqual(config);
   });
 
+  it('accepts an openrouter selection with a valid reasoning effort', () => {
+    const config: ModelConfig = {
+      transcriptionVerifier: { provider: 'gemini', model: 'gemini-3.1-flash-lite' },
+      translation: { provider: 'openrouter', model: 'qwen/qwen3.6-flash', reasoning: 'high' },
+      translationVerifier: { provider: 'gemini', model: 'gemini-3.1-flash-lite' },
+    };
+    expect(validateModelConfig(config)).toEqual(config);
+  });
+
+  it('rejects an openrouter selection with an invalid reasoning value', () => {
+    expect(
+      validateModelConfig({
+        transcriptionVerifier: { provider: 'gemini', model: 'gemini-3.1-flash-lite' },
+        translation: { provider: 'openrouter', model: 'qwen/qwen3.6-flash', reasoning: 'extreme' },
+        translationVerifier: { provider: 'gemini', model: 'gemini-3.1-flash-lite' },
+      })
+    ).toBeNull();
+  });
+
   it('rejects a config missing a role', () => {
     expect(validateModelConfig({ transcriptionVerifier: 'gemini-3.1-flash-lite', translation: 'gemini-3.5-flash' })).toBeNull();
   });

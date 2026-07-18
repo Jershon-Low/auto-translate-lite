@@ -16,5 +16,5 @@ export function getProvider(selection: RoleModelSelection, notes: string, client
   if (!clients.openRouter) {
     throw new Error('OPENROUTER_API_KEY is not configured');
   }
-  return new OpenRouterProvider(clients.openRouter, selection.model, notes);
+  return new OpenRouterProvider(clients.openRouter, selection.model, notes, selection.reasoning);
 }

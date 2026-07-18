@@ -35,4 +35,18 @@ describe('getProvider', () => {
       'OPENROUTER_API_KEY is not configured'
     );
   });
+
+  it('passes the reasoning effort through to OpenRouterProvider', async () => {
+    const client = fakeOpenRouterClient();
+    (client.chat.completions.create as any).mockResolvedValue({ choices: [{ message: { content: '{"zh":"你好"}' } }] });
+    const clients: LlmClients = { gemini: fakeGeminiClient(), openRouter: client };
+    const provider = getProvider(
+      { provider: 'openrouter', model: 'qwen/qwen3.6-flash', reasoning: 'high' },
+      'notes',
+      clients
+    );
+    await provider.translate('Hello', ['zh'], [], null);
+    const call = (client.chat.completions.create as any).mock.calls[0][0];
+    expect(call.reasoning).toEqual({ effort: 'high' });
+  });
 });

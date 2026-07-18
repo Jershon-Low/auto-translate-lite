@@ -1,6 +1,8 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { MODEL_IDS, type ModelId, type RoleModelSelection } from './llmTypes.js';
+import { MODEL_IDS, type ModelId, type OpenRouterReasoningEffort, type RoleModelSelection } from './llmTypes.js';
+
+const OPENROUTER_REASONING_EFFORTS: OpenRouterReasoningEffort[] = ['off', 'low', 'medium', 'high'];
 
 export interface ModelConfig {
   transcriptionVerifier: RoleModelSelection;
@@ -30,9 +32,12 @@ function normalizeRoleSelection(value: unknown): RoleModelSelection | null {
     return MODEL_IDS.includes(candidate.model as ModelId) ? { provider: 'gemini', model: candidate.model as ModelId } : null;
   }
   if (candidate.provider === 'openrouter') {
-    return typeof candidate.model === 'string' && candidate.model.length > 0
-      ? { provider: 'openrouter', model: candidate.model }
-      : null;
+    if (typeof candidate.model !== 'string' || candidate.model.length === 0) return null;
+    if (candidate.reasoning === undefined) {
+      return { provider: 'openrouter', model: candidate.model };
+    }
+    if (!OPENROUTER_REASONING_EFFORTS.includes(candidate.reasoning as OpenRouterReasoningEffort)) return null;
+    return { provider: 'openrouter', model: candidate.model, reasoning: candidate.reasoning as OpenRouterReasoningEffort };
   }
   return null;
 }

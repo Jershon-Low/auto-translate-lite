@@ -19,6 +19,7 @@ import { GeminiCallLimiter } from './geminiLimiter.js';
 import { createOpenRouterClient } from './openRouterClient.js';
 import { withOpenRouterCostTracking } from './openRouterCostTracking.js';
 import { withOpenRouterLimiter } from './openRouterLimiter.js';
+import { withOpenRouterReasoningLogging } from './openRouterReasoningLogging.js';
 
 const requiredEnvVars = ['DEEPGRAM_API_KEY', 'GEMINI_API_KEY'] as const;
 for (const key of requiredEnvVars) {
@@ -36,9 +37,11 @@ const geminiClient = withCostTracking(
 );
 const openRouterLimiter = new GeminiCallLimiter();
 const openRouterClient = process.env.OPENROUTER_API_KEY
-  ? withOpenRouterCostTracking(
-      withOpenRouterLimiter(createOpenRouterClient(process.env.OPENROUTER_API_KEY), openRouterLimiter),
-      costTracker
+  ? withOpenRouterReasoningLogging(
+      withOpenRouterCostTracking(
+        withOpenRouterLimiter(createOpenRouterClient(process.env.OPENROUTER_API_KEY), openRouterLimiter),
+        costTracker
+      )
     )
   : null;
 const sermonDocStore = createSermonDocStore();
