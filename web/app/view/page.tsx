@@ -230,7 +230,7 @@ function ViewerPageContent() {
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-6 sm:px-10 pt-4 pb-16 space-y-6"
+        className="flex-1 overflow-y-auto px-6 sm:px-10 pt-4 pb-16 space-y-3"
       >
         {lines.map((line, index) =>
           line.removed ? (
@@ -240,7 +240,7 @@ function ViewerPageContent() {
               <span className="flex-1 border-t border-dashed" />
             </div>
           ) : (
-            <div key={line.id} className="flex items-start gap-2">
+            <div key={line.id} className="flex items-start gap-2 hover:bg-accent/50 p-2 rounded-md transition-colors">
               <div className="flex-1 min-w-0">
                 <p className="text-sm text-muted-foreground">{line.english}</p>
                 <p className={`text-xl sm:text-2xl ${line.flagged ? 'text-rose-400' : ''}`}>{line.translated}</p>
