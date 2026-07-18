@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { WebSocket } from 'ws';
+import { WebSocket } from 'ws';
 import { TranscriptBuffer } from './transcriptBuffer.js';
 import { TranslationCache } from './translationCache.js';
 import type { RoleCaches } from './sermonCache.js';
@@ -22,7 +22,11 @@ export class Session {
   inFlightFills: Map<string, Promise<void>> = new Map();
   mode: 'automatic' | 'manual' = 'automatic';
   translationFlagDisplayMode: TranslationFlagDisplayMode = 'hide';
+  captureSocket: WebSocket | null = null;
+  ingestQueue: Promise<void> = Promise.resolve();
+  publishQueue: Promise<void> = Promise.resolve();
   private viewers: Map<WebSocket, string> = new Map();
+  private reviewSockets: Set<WebSocket> = new Set();
 
   start(): void {
     this.id = randomUUID();
@@ -33,6 +37,8 @@ export class Session {
     this.translationCache = new TranslationCache();
     this.inFlightFills = new Map();
     this.translationFlagDisplayMode = 'hide';
+    this.ingestQueue = Promise.resolve();
+    this.publishQueue = Promise.resolve();
   }
 
   stop(): void {
@@ -63,5 +69,23 @@ export class Session {
 
   getAllViewers(): WebSocket[] {
     return Array.from(this.viewers.keys());
+  }
+
+  addReview(socket: WebSocket): void {
+    this.reviewSockets.add(socket);
+  }
+
+  removeReview(socket: WebSocket): void {
+    this.reviewSockets.delete(socket);
+  }
+
+  getAllReview(): WebSocket[] {
+    return Array.from(this.reviewSockets);
+  }
+
+  broadcastToReview(payload: string): void {
+    for (const socket of this.reviewSockets) {
+      if (socket.readyState === WebSocket.OPEN) socket.send(payload);
+    }
   }
 }

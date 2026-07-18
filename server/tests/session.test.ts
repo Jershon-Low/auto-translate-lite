@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import type { WebSocket } from 'ws';
+import { describe, it, expect, vi } from 'vitest';
+import { WebSocket } from 'ws';
 import { Session } from '../src/session';
 
 function fakeSocket(): WebSocket {
@@ -113,5 +113,41 @@ describe('Session', () => {
     session.mode = 'manual';
     session.start();
     expect(session.mode).toBe('manual');
+  });
+
+  it('defaults captureSocket to null', () => {
+    const session = new Session();
+    expect(session.captureSocket).toBeNull();
+  });
+
+  it('reviewSockets: adds, lists, and removes review connections', () => {
+    const session = new Session();
+    const socketA = fakeSocket();
+    const socketB = fakeSocket();
+    session.addReview(socketA);
+    session.addReview(socketB);
+    expect(session.getAllReview()).toEqual([socketA, socketB]);
+    session.removeReview(socketA);
+    expect(session.getAllReview()).toEqual([socketB]);
+  });
+
+  it('broadcastToReview sends only to sockets whose readyState is OPEN', () => {
+    const session = new Session();
+    const open = { readyState: WebSocket.OPEN, send: vi.fn() } as unknown as WebSocket;
+    const closed = { readyState: WebSocket.CLOSED, send: vi.fn() } as unknown as WebSocket;
+    session.addReview(open);
+    session.addReview(closed);
+    session.broadcastToReview('hello');
+    expect(open.send).toHaveBeenCalledWith('hello');
+    expect(closed.send).not.toHaveBeenCalled();
+  });
+
+  it('start() resets ingestQueue and publishQueue to fresh resolved promises', () => {
+    const session = new Session();
+    const originalIngest = session.ingestQueue;
+    const originalPublish = session.publishQueue;
+    session.start();
+    expect(session.ingestQueue).not.toBe(originalIngest);
+    expect(session.publishQueue).not.toBe(originalPublish);
   });
 });
