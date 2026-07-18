@@ -44,7 +44,7 @@ function LandingPageContent() {
         {TARGET_LANGUAGES.map((language) => (
           <Card
             key={language.code}
-            className="cursor-pointer outline-none transition-colors hover:ring-2 hover:ring-primary focus-visible:ring-2 focus-visible:ring-primary"
+            className="cursor-pointer transition-colors hover:ring-2 hover:ring-primary"
             onClick={() => selectLanguage(language.code)}
           >
             <CardContent className="flex min-h-24 flex-col items-center justify-center gap-2 p-4 text-center">

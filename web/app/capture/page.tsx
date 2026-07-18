@@ -470,8 +470,8 @@ export default function CapturePage() {
             Session: ${sessionCostUsd.toFixed(4)} · Lifetime: ${lifetimeCostUsd.toFixed(2)}
           </span>
           <div className="flex items-center gap-2">
-            <label htmlFor="sermon-doc" className="font-medium text-foreground">
-              Sermon document
+            <label htmlFor="sermon-doc" className="flex items-center font-medium text-foreground bg-muted px-3 h-8 rounded-md text-sm text-center">
+              Sermon document (optional, PDF or Word)
             </label>
             <input
               id="sermon-doc"
@@ -483,7 +483,7 @@ export default function CapturePage() {
               className="text-xs"
             />
             {isUploading && <span>Uploading…</span>}
-            {hasUploadedDoc && !isUploading && <span className="text-green-500">Loaded.</span>}
+            {hasUploadedDoc && !isUploading && <span className="text-green-500">Document loaded.</span>}
             {uploadError && <span className="text-destructive">{uploadError}</span>}
           </div>
         </div>
@@ -638,7 +638,7 @@ export default function CapturePage() {
             >
               {transcriptLines.map((line) => (
                 <div key={line.id} className="group">
-                  <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start justify-between gap-2 hover:bg-accent/30 rounded-md">
                     <p className={line.flagged ? 'text-destructive line-through' : undefined}>{line.text}</p>
                     {!line.flagged && (
                       <Button
