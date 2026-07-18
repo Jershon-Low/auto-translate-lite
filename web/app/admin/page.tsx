@@ -1,6 +1,17 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { toast } from 'sonner';
+import { Lock } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Textarea } from '@/components/ui/textarea';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001';
 const API_URL = WS_URL.replace(/^ws/, 'http');
@@ -56,16 +67,13 @@ export default function AdminPage() {
 
   const [modelConfig, setModelConfig] = useState<ModelConfig | null>(null);
   const [modelSaveStatus, setModelSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
-  const [modelError, setModelError] = useState<string | null>(null);
 
   const [notes, setNotes] = useState<PromptConfig | null>(null);
   const [fixedRules, setFixedRules] = useState<PromptConfig | null>(null);
   const [notesSaveStatus, setNotesSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
-  const [notesError, setNotesError] = useState<string | null>(null);
 
   const [displayConfig, setDisplayConfig] = useState<TranslationFlagDisplayConfig | null>(null);
   const [displaySaveStatus, setDisplaySaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
-  const [displayError, setDisplayError] = useState<string | null>(null);
 
   const [openRouterModels, setOpenRouterModels] = useState<string[]>([]);
   const [newModelInputs, setNewModelInputs] = useState<Record<Role, string>>({
@@ -130,7 +138,6 @@ export default function AdminPage() {
   async function saveModelConfig() {
     if (!modelConfig) return;
     setModelSaveStatus('saving');
-    setModelError(null);
     try {
       const response = await fetch(`${API_URL}/admin/model-config`, {
         method: 'PUT',
@@ -138,13 +145,14 @@ export default function AdminPage() {
         body: JSON.stringify(modelConfig),
       });
       if (!response.ok) {
-        setModelError(`Save failed (status ${response.status}).`);
+        toast.error(`Save failed (status ${response.status}).`);
         setModelSaveStatus('idle');
         return;
       }
       setModelSaveStatus('saved');
+      toast.success('Models saved.');
     } catch {
-      setModelError('Save failed. Check your connection and try again.');
+      toast.error('Save failed. Check your connection and try again.');
       setModelSaveStatus('idle');
     }
   }
@@ -174,7 +182,6 @@ export default function AdminPage() {
   async function saveNotes() {
     if (!notes) return;
     setNotesSaveStatus('saving');
-    setNotesError(null);
     try {
       const response = await fetch(`${API_URL}/admin/prompt-config`, {
         method: 'PUT',
@@ -182,13 +189,14 @@ export default function AdminPage() {
         body: JSON.stringify(notes),
       });
       if (!response.ok) {
-        setNotesError(`Save failed (status ${response.status}).`);
+        toast.error(`Save failed (status ${response.status}).`);
         setNotesSaveStatus('idle');
         return;
       }
       setNotesSaveStatus('saved');
+      toast.success('Prompt notes saved.');
     } catch {
-      setNotesError('Save failed. Check your connection and try again.');
+      toast.error('Save failed. Check your connection and try again.');
       setNotesSaveStatus('idle');
     }
   }
@@ -196,7 +204,6 @@ export default function AdminPage() {
   async function saveDisplayConfig() {
     if (!displayConfig) return;
     setDisplaySaveStatus('saving');
-    setDisplayError(null);
     try {
       const response = await fetch(`${API_URL}/admin/translation-flag-display`, {
         method: 'PUT',
@@ -204,237 +211,250 @@ export default function AdminPage() {
         body: JSON.stringify(displayConfig),
       });
       if (!response.ok) {
-        setDisplayError(`Save failed (status ${response.status}).`);
+        toast.error(`Save failed (status ${response.status}).`);
         setDisplaySaveStatus('idle');
         return;
       }
       setDisplaySaveStatus('saved');
+      toast.success('Display setting saved.');
     } catch {
-      setDisplayError('Save failed. Check your connection and try again.');
+      toast.error('Save failed. Check your connection and try again.');
       setDisplaySaveStatus('idle');
     }
   }
 
   if (!authorized) {
     return (
-      <main className="min-h-screen flex flex-col items-center justify-center gap-4 p-6">
-        <h1 className="text-xl font-semibold">Admin</h1>
-        <input
-          type="password"
-          value={enteredPasscode}
-          onChange={(event) => setEnteredPasscode(event.target.value)}
-          placeholder="Passcode"
-          className="border rounded p-2 text-sm w-64"
-          disabled={checkingAuth}
-        />
-        <button
-          onClick={submitPasscode}
-          disabled={checkingAuth || enteredPasscode.length === 0}
-          className="bg-primary text-primary-foreground px-4 py-2 rounded disabled:opacity-50"
-        >
-          {checkingAuth ? 'Checking…' : 'Enter'}
-        </button>
-        {authError && <p className="text-sm text-destructive">{authError}</p>}
+      <main className="flex min-h-screen flex-col items-center justify-center p-6">
+        <Card className="w-full max-w-sm">
+          <CardHeader>
+            <CardTitle>Admin access</CardTitle>
+            <CardDescription>Enter the admin passcode to continue.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <div className="relative">
+              <Lock className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                type="password"
+                value={enteredPasscode}
+                onChange={(event) => setEnteredPasscode(event.target.value)}
+                placeholder="Passcode"
+                className="pl-8"
+                disabled={checkingAuth}
+              />
+            </div>
+            <Button onClick={submitPasscode} disabled={checkingAuth || enteredPasscode.length === 0}>
+              {checkingAuth ? 'Checking…' : 'Enter'}
+            </Button>
+            {authError && (
+              <Alert variant="destructive">
+                <AlertDescription>{authError}</AlertDescription>
+              </Alert>
+            )}
+          </CardContent>
+        </Card>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen flex flex-col items-center gap-8 p-6">
+    <main className="flex min-h-screen flex-col items-center gap-6 p-6">
       <h1 className="text-xl font-semibold">Admin</h1>
+      <Tabs defaultValue="models" className="w-full max-w-2xl">
+        <TabsList>
+          <TabsTrigger value="models">Models</TabsTrigger>
+          <TabsTrigger value="notes">Prompt notes</TabsTrigger>
+          <TabsTrigger value="display">Display</TabsTrigger>
+        </TabsList>
 
-      <div className="w-full max-w-xl flex flex-col gap-3">
-        <h2 className="text-lg font-medium">Models</h2>
-        {modelConfig &&
-          ROLES.map((role) => {
-            const selection = modelConfig[role];
-            return (
-              <div key={role} className="flex flex-col gap-1 border-b pb-2">
-                <div className="flex items-center justify-between gap-2">
-                  <label className="text-sm font-medium">{ROLE_LABELS[role]}</label>
-                  <select
-                    value={selection.provider}
-                    onChange={(event) => {
-                      const provider = event.target.value as Provider;
-                      const nextSelection: RoleModelSelection =
-                        provider === 'gemini'
-                          ? { provider: 'gemini', model: GEMINI_MODEL_IDS[0] }
-                          : { provider: 'openrouter', model: openRouterModels[0] ?? '' };
-                      setModelConfig({ ...modelConfig, [role]: nextSelection });
-                      setModelSaveStatus('idle');
-                    }}
-                    className="border rounded p-1 text-sm"
-                  >
-                    <option value="gemini">Gemini</option>
-                    <option value="openrouter">OpenRouter</option>
-                  </select>
-                </div>
-                {selection.provider === 'gemini' ? (
-                  <select
-                    value={selection.model}
-                    onChange={(event) => {
-                      setModelConfig({
-                        ...modelConfig,
-                        [role]: { provider: 'gemini', model: event.target.value as GeminiModelId },
-                      });
-                      setModelSaveStatus('idle');
-                    }}
-                    className="border rounded p-1 text-sm"
-                  >
-                    {GEMINI_MODEL_IDS.map((id) => (
-                      <option key={id} value={id}>
-                        {id}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <div className="flex flex-col gap-1">
-                    <select
-                      value={selection.model}
-                      onChange={(event) => {
-                        setModelConfig({ ...modelConfig, [role]: { ...selection, model: event.target.value } });
-                        setModelSaveStatus('idle');
-                      }}
-                      className="border rounded p-1 text-sm"
-                    >
-                      {openRouterModels.length === 0 && <option value="">No models added yet</option>}
-                      {openRouterModels.map((id) => (
-                        <option key={id} value={id}>
-                          {id}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="flex items-center gap-2">
-                      <label className="text-xs text-muted-foreground">Thinking</label>
-                      <select
-                        value={selection.reasoning ?? 'off'}
-                        onChange={(event) => {
-                          const reasoning = event.target.value as OpenRouterReasoningEffort;
+        <TabsContent value="models" className="flex flex-col gap-4">
+          {modelConfig &&
+            ROLES.map((role) => {
+              const selection = modelConfig[role];
+              return (
+                <Card key={role}>
+                  <CardHeader>
+                    <CardTitle>{ROLE_LABELS[role]}</CardTitle>
+                    <CardAction>
+                      <Select
+                        value={selection.provider}
+                        onValueChange={(value) => {
+                          const provider = value as Provider;
+                          const nextSelection: RoleModelSelection =
+                            provider === 'gemini'
+                              ? { provider: 'gemini', model: GEMINI_MODEL_IDS[0] }
+                              : { provider: 'openrouter', model: openRouterModels[0] ?? '' };
+                          setModelConfig({ ...modelConfig, [role]: nextSelection });
+                          setModelSaveStatus('idle');
+                        }}
+                      >
+                        <SelectTrigger className="w-36">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            <SelectItem value="gemini">Gemini</SelectItem>
+                            <SelectItem value="openrouter">OpenRouter</SelectItem>
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                    </CardAction>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3">
+                    {selection.provider === 'gemini' ? (
+                      <Select
+                        value={selection.model}
+                        onValueChange={(value) => {
                           setModelConfig({
                             ...modelConfig,
-                            [role]: { ...selection, reasoning: reasoning === 'off' ? undefined : reasoning },
+                            [role]: { provider: 'gemini', model: value as GeminiModelId },
                           });
                           setModelSaveStatus('idle');
                         }}
-                        className="border rounded p-1 text-sm"
                       >
-                        {REASONING_EFFORTS.map((effort) => (
-                          <option key={effort} value={effort}>
-                            {REASONING_LABELS[effort]}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={newModelInputs[role]}
-                        onChange={(event) => setNewModelInputs({ ...newModelInputs, [role]: event.target.value })}
-                        placeholder="e.g. qwen/qwen3.6-flash"
-                        className="border rounded p-1 text-sm flex-1"
-                      />
-                      <button
-                        onClick={() => void addOpenRouterModel(role)}
-                        disabled={newModelInputs[role].trim().length === 0}
-                        className="bg-secondary text-secondary-foreground px-2 py-1 rounded text-sm disabled:opacity-50"
-                      >
-                        Add
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={saveModelConfig}
-            disabled={modelSaveStatus === 'saving'}
-            className="bg-secondary text-secondary-foreground px-4 py-2 rounded disabled:opacity-50"
-          >
-            Save models
-          </button>
-          {modelSaveStatus === 'saved' && <p className="text-sm text-green-600">Saved.</p>}
-        </div>
-        {modelError && <p className="text-sm text-destructive">{modelError}</p>}
-      </div>
-
-      <div className="w-full max-w-xl flex flex-col gap-6">
-        <h2 className="text-lg font-medium">Prompt notes</h2>
-        {notes &&
-          fixedRules &&
-          ROLES.map((role) => (
-            <div key={role} className="flex flex-col gap-2">
-              <label className="text-sm font-medium">{ROLE_LABELS[role]}</label>
-              <p className="text-xs text-muted-foreground border rounded p-2 bg-accent/20 whitespace-pre-wrap">
-                {fixedRules[role]}
-              </p>
-              <textarea
-                value={notes[role]}
-                onChange={(event) => {
-                  setNotes({ ...notes, [role]: event.target.value });
-                  setNotesSaveStatus('idle');
-                }}
-                rows={4}
-                className="w-full border rounded p-2 text-sm"
-              />
-            </div>
-          ))}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={saveNotes}
-            disabled={notesSaveStatus === 'saving'}
-            className="bg-secondary text-secondary-foreground px-4 py-2 rounded disabled:opacity-50"
-          >
-            Save notes
-          </button>
-          {notesSaveStatus === 'saved' && <p className="text-sm text-green-600">Saved.</p>}
-        </div>
-        {notesError && <p className="text-sm text-destructive">{notesError}</p>}
-      </div>
-
-      <div className="w-full max-w-xl flex flex-col gap-3">
-        <h2 className="text-lg font-medium">Unsafe translation display</h2>
-        {displayConfig && (
-          <div className="flex flex-col gap-2 text-sm">
-            <label className="flex items-center gap-2">
-              <input
-                type="radio"
-                name="translationFlagDisplayMode"
-                checked={displayConfig.mode === 'hide'}
-                onChange={() => {
-                  setDisplayConfig({ mode: 'hide' });
-                  setDisplaySaveStatus('idle');
-                }}
-              />
-              Hide (fallback to English)
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="radio"
-                name="translationFlagDisplayMode"
-                checked={displayConfig.mode === 'flag'}
-                onChange={() => {
-                  setDisplayConfig({ mode: 'flag' });
-                  setDisplaySaveStatus('idle');
-                }}
-              />
-              Show in viewer, marked red, with reason
-            </label>
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            {GEMINI_MODEL_IDS.map((id) => (
+                              <SelectItem key={id} value={id}>
+                                {id}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <>
+                        <Select
+                          value={selection.model}
+                          onValueChange={(value) => {
+                            setModelConfig({ ...modelConfig, [role]: { ...selection, model: value } });
+                            setModelSaveStatus('idle');
+                          }}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder="No models added yet" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              {openRouterModels.map((id) => (
+                                <SelectItem key={id} value={id}>
+                                  {id}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground">Thinking</span>
+                          <ToggleGroup
+                            value={[selection.reasoning ?? 'off']}
+                            onValueChange={(values) => {
+                              const value = values[0];
+                              if (!value) return;
+                              const reasoning = value as OpenRouterReasoningEffort;
+                              setModelConfig({
+                                ...modelConfig,
+                                [role]: { ...selection, reasoning: reasoning === 'off' ? undefined : reasoning },
+                              });
+                              setModelSaveStatus('idle');
+                            }}
+                          >
+                            {REASONING_EFFORTS.map((effort) => (
+                              <ToggleGroupItem key={effort} value={effort} size="sm">
+                                {REASONING_LABELS[effort]}
+                              </ToggleGroupItem>
+                            ))}
+                          </ToggleGroup>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            value={newModelInputs[role]}
+                            onChange={(event) => setNewModelInputs({ ...newModelInputs, [role]: event.target.value })}
+                            placeholder="e.g. qwen/qwen3.6-flash"
+                            className="flex-1"
+                          />
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => void addOpenRouterModel(role)}
+                            disabled={newModelInputs[role].trim().length === 0}
+                          >
+                            Add
+                          </Button>
+                        </div>
+                      </>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })}
+          <div>
+            <Button variant="secondary" onClick={saveModelConfig} disabled={modelSaveStatus === 'saving'}>
+              Save models
+            </Button>
           </div>
-        )}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={saveDisplayConfig}
-            disabled={displaySaveStatus === 'saving'}
-            className="bg-secondary text-secondary-foreground px-4 py-2 rounded disabled:opacity-50"
-          >
-            Save display setting
-          </button>
-          {displaySaveStatus === 'saved' && <p className="text-sm text-green-600">Saved.</p>}
-        </div>
-        {displayError && <p className="text-sm text-destructive">{displayError}</p>}
-      </div>
+        </TabsContent>
+
+        <TabsContent value="notes" className="flex flex-col gap-6">
+          {notes &&
+            fixedRules &&
+            ROLES.map((role) => (
+              <div key={role} className="flex flex-col gap-2">
+                <label className="text-sm font-medium">{ROLE_LABELS[role]}</label>
+                <Alert>
+                  <AlertDescription className="whitespace-pre-wrap">{fixedRules[role]}</AlertDescription>
+                </Alert>
+                <Textarea
+                  value={notes[role]}
+                  onChange={(event) => {
+                    setNotes({ ...notes, [role]: event.target.value });
+                    setNotesSaveStatus('idle');
+                  }}
+                  rows={4}
+                />
+              </div>
+            ))}
+          <div>
+            <Button variant="secondary" onClick={saveNotes} disabled={notesSaveStatus === 'saving'}>
+              Save notes
+            </Button>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="display" className="flex max-w-xl flex-col gap-4">
+          {displayConfig && (
+            <RadioGroup
+              value={displayConfig.mode}
+              onValueChange={(value) => {
+                setDisplayConfig({ mode: value as TranslationFlagDisplayMode });
+                setDisplaySaveStatus('idle');
+              }}
+              className="flex flex-col gap-3"
+            >
+              <div className="flex items-center gap-2">
+                <RadioGroupItem value="hide" id="display-hide" />
+                <label htmlFor="display-hide" className="text-sm">
+                  Hide (fallback to English)
+                </label>
+              </div>
+              <div className="flex items-center gap-2">
+                <RadioGroupItem value="flag" id="display-flag" />
+                <label htmlFor="display-flag" className="text-sm">
+                  Show in viewer, marked red, with reason
+                </label>
+              </div>
+            </RadioGroup>
+          )}
+          <div>
+            <Button variant="secondary" onClick={saveDisplayConfig} disabled={displaySaveStatus === 'saving'}>
+              Save display setting
+            </Button>
+          </div>
+        </TabsContent>
+      </Tabs>
     </main>
   );
 }
