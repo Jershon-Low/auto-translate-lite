@@ -147,6 +147,7 @@ describe('wsServer', () => {
       httpServer,
       session,
       geminiClient,
+      llmClients: { gemini: geminiClient, openRouter: null },
       deepgramApiKey: 'fake-key',
       createDeepgramConnection: (_apiKey, callbacks) => {
         capturedCallbacks = callbacks;

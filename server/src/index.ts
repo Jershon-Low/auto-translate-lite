@@ -15,6 +15,9 @@ import { createTranslationFlagDisplayStore } from './translationFlagDisplayStore
 import { withCostTracking } from './geminiCostTracking.js';
 import { withGeminiLimiter } from './geminiRateLimiting.js';
 import { GeminiCallLimiter } from './geminiLimiter.js';
+import { createOpenRouterClient } from './openRouterClient.js';
+import { withOpenRouterCostTracking } from './openRouterCostTracking.js';
+import { withOpenRouterLimiter } from './openRouterLimiter.js';
 
 const requiredEnvVars = ['DEEPGRAM_API_KEY', 'GEMINI_API_KEY'] as const;
 for (const key of requiredEnvVars) {
@@ -30,6 +33,13 @@ const geminiClient = withCostTracking(
   withGeminiLimiter(createGeminiClient(process.env.GEMINI_API_KEY!), geminiLimiter),
   costTracker
 );
+const openRouterLimiter = new GeminiCallLimiter();
+const openRouterClient = process.env.OPENROUTER_API_KEY
+  ? withOpenRouterCostTracking(
+      withOpenRouterLimiter(createOpenRouterClient(process.env.OPENROUTER_API_KEY), openRouterLimiter),
+      costTracker
+    )
+  : null;
 const sermonDocStore = createSermonDocStore();
 const feedbackStore = createFeedbackStore(process.env.FEEDBACK_FILE_PATH ?? 'data/feedback.txt');
 const viewerFeedbackStore = createViewerFeedbackStore(
@@ -57,6 +67,7 @@ attachWsServer({
   httpServer,
   session,
   geminiClient,
+  llmClients: { gemini: geminiClient, openRouter: openRouterClient },
   deepgramApiKey: process.env.DEEPGRAM_API_KEY!,
   createDeepgramConnection,
   sermonDocStore,

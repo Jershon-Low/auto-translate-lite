@@ -8,6 +8,7 @@ import type { TranscriptionCheckResult } from './transcriptionVerifier.js';
 import type { DeepgramConnection, DeepgramConnectionFactory } from './deepgram.js';
 import { createRoleCaches, deleteRoleCaches } from './sermonCache.js';
 import { getProvider } from './llmRegistry.js';
+import type { LlmClients } from './llmRegistry.js';
 import type { SermonDocStore } from './sermonDocStore.js';
 import type { FeedbackStore } from './feedbackStore.js';
 import type { CostTracker } from './costTracker.js';
@@ -39,6 +40,7 @@ export interface WsServerDeps {
   httpServer: HttpServer;
   session: Session;
   geminiClient: GeminiClient;
+  llmClients: LlmClients;
   deepgramApiKey: string;
   createDeepgramConnection: DeepgramConnectionFactory;
   sermonDocStore: SermonDocStore;
@@ -136,9 +138,9 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             const translationFlagDisplayConfig = await deps.translationFlagDisplayStore.read();
 
             deps.session.providers = {
-              transcriptionVerifier: getProvider(modelConfig.transcriptionVerifier, promptConfig.transcriptionVerifier, deps.geminiClient),
-              translation: getProvider(modelConfig.translation, promptConfig.translation, deps.geminiClient),
-              translationVerifier: getProvider(modelConfig.translationVerifier, promptConfig.translationVerifier, deps.geminiClient),
+              transcriptionVerifier: getProvider(modelConfig.transcriptionVerifier, promptConfig.transcriptionVerifier, deps.llmClients),
+              translation: getProvider(modelConfig.translation, promptConfig.translation, deps.llmClients),
+              translationVerifier: getProvider(modelConfig.translationVerifier, promptConfig.translationVerifier, deps.llmClients),
             };
             deps.session.roleCaches = await createRoleCaches(deps.geminiClient, modelConfig, promptConfig, feedbackText, sermonText);
             deps.session.translationFlagDisplayMode = translationFlagDisplayConfig.mode;
