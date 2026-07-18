@@ -10,9 +10,19 @@ export class TranscriptBuffer {
     english: string,
     timestampMs: number = Date.now(),
     suppressed: boolean = false,
-    pendingTranslations?: Record<string, string>
+    pendingTranslations?: Record<string, string>,
+    pending?: boolean,
+    reason?: string
   ): CaptionLine {
-    const line: CaptionLine = { id: randomUUID(), timestampMs, english, suppressed, pendingTranslations };
+    const line: CaptionLine = {
+      id: randomUUID(),
+      timestampMs,
+      english,
+      suppressed,
+      pendingTranslations,
+      pending,
+      reason,
+    };
     this.lines.push(line);
     this.trim(timestampMs);
     return line;
@@ -34,6 +44,8 @@ export class TranscriptBuffer {
     if (!line) return null;
     line.english = english;
     line.suppressed = false;
+    line.pending = undefined;
+    line.reason = undefined;
     return line;
   }
 
@@ -42,6 +54,7 @@ export class TranscriptBuffer {
     const line = this.lines.find((candidate) => candidate.id === id && !candidate.suppressed);
     if (!line) return null;
     line.suppressed = true;
+    line.reason = 'Removed by admin';
     return line;
   }
 

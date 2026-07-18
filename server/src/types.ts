@@ -4,4 +4,6 @@ export interface CaptionLine {
   english: string;
   suppressed: boolean;
   pendingTranslations?: Record<string, string>;
+  pending?: boolean;
+  reason?: string;
 }

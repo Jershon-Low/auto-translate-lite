@@ -49,6 +49,13 @@ describe('TranscriptBuffer', () => {
     expect(line.pendingTranslations).toBeUndefined();
   });
 
+  it('append() stores pending and reason when provided', () => {
+    const buffer = new TranscriptBuffer();
+    const line = buffer.append('Hidden', 1000, true, undefined, true, 'Pending manual approval');
+    expect(line.pending).toBe(true);
+    expect(line.reason).toBe('Pending manual approval');
+  });
+
   describe('peek', () => {
     it('returns the matching line without mutating its suppressed state', () => {
       const buffer = new TranscriptBuffer();
@@ -105,6 +112,14 @@ describe('TranscriptBuffer', () => {
       const elevenMinutesLater = 11 * 60 * 1000;
       expect(buffer.reinstate(flagged.id, 'text', elevenMinutesLater)).toBeNull();
     });
+
+    it('clears pending and reason on reinstate', () => {
+      const buffer = new TranscriptBuffer();
+      const flagged = buffer.append('Mishe*rd', 1000, true, undefined, true, 'Pending manual approval');
+      const result = buffer.reinstate(flagged.id, 'Corrected', 2000);
+      expect(result!.pending).toBeUndefined();
+      expect(result!.reason).toBeUndefined();
+    });
   });
 
   describe('suppress', () => {
@@ -155,6 +170,13 @@ describe('TranscriptBuffer', () => {
       expect(result).not.toBeNull();
       expect(result!.suppressed).toBe(false);
       expect(result!.english).toBe('Round trip corrected');
+    });
+
+    it('sets reason to "Removed by admin"', () => {
+      const buffer = new TranscriptBuffer();
+      const visible = buffer.append('Visible line', 1000);
+      const result = buffer.suppress(visible.id, 2000);
+      expect(result!.reason).toBe('Removed by admin');
     });
   });
 
