@@ -145,4 +145,30 @@ describe('createCostTracker', () => {
 
     expect(calls).toHaveLength(0);
   });
+
+  it('adds the given OpenRouter cost directly to the running total, with no pricing lookup', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'cost-test-'));
+    const tracker = createCostTracker(join(tempDir, 'cost.json'));
+
+    tracker.recordOpenRouterUsage({ model: 'qwen/qwen3.6-flash', costUsd: 0.0042 });
+
+    expect(tracker.getSessionCostUsd()).toBeCloseTo(0.0042, 6);
+    expect(tracker.getLifetimeCostUsd()).toBeCloseTo(0.0042, 6);
+  });
+
+  it('accumulates OpenRouter and Gemini costs together in the same running total', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'cost-test-'));
+    const tracker = createCostTracker(join(tempDir, 'cost.json'));
+
+    tracker.recordGeminiUsage({
+      model: 'gemini-3.1-flash-lite',
+      promptTokens: 1_000_000,
+      candidatesTokens: 100_000,
+      cachedTokens: 0,
+    });
+    tracker.recordOpenRouterUsage({ model: 'qwen/qwen3.6-flash', costUsd: 0.01 });
+
+    // Gemini: 1,000,000 non-cached @ $0.25/1M = $0.25; 100,000 output @ $1.50/1M = $0.15. Plus $0.01 OpenRouter.
+    expect(tracker.getSessionCostUsd()).toBeCloseTo(0.41, 6);
+  });
 });
