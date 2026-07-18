@@ -56,7 +56,7 @@ export function attachWsServer(deps: WsServerDeps): void {
 
   deps.httpServer.on('upgrade', (request, socket, head) => {
     const { pathname } = new URL(request.url ?? '', 'http://localhost');
-    if (pathname === '/ws/capture' || pathname === '/ws/viewer') {
+    if (pathname === '/ws/capture' || pathname === '/ws/viewer' || pathname === '/ws/review') {
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request, pathname);
       });
@@ -68,6 +68,8 @@ export function attachWsServer(deps: WsServerDeps): void {
   wss.on('connection', (ws: WebSocket, _request: IncomingMessage, pathname: string) => {
     if (pathname === '/ws/capture') {
       handleCaptureConnection(ws, deps);
+    } else if (pathname === '/ws/review') {
+      handleReviewConnection(ws, deps);
     } else {
       handleViewerConnection(ws, deps);
     }
@@ -168,16 +170,22 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                   });
               },
               onError: () => {
-                ws.send(JSON.stringify({ type: 'status', status: 'error' }));
+                const errorPayload = JSON.stringify({ type: 'status', status: 'error' });
+                ws.send(errorPayload);
+                deps.session.broadcastToReview(errorPayload);
               },
               onClose: () => {},
             });
             recordingStartedAt = Date.now();
-            ws.send(JSON.stringify({ type: 'status', status: 'recording' }));
+            const recordingPayload = JSON.stringify({ type: 'status', status: 'recording' });
+            ws.send(recordingPayload);
+            deps.session.broadcastToReview(recordingPayload);
 
             deps.costTracker.resetSession();
             unsubscribeCost = deps.costTracker.onUpdate((sessionUsd, lifetimeUsd) => {
-              ws.send(JSON.stringify({ type: 'cost', sessionUsd, lifetimeUsd }));
+              const costPayload = JSON.stringify({ type: 'cost', sessionUsd, lifetimeUsd });
+              ws.send(costPayload);
+              deps.session.broadcastToReview(costPayload);
             });
           } else if (message.type === 'stop') {
             deps.session.stop();
@@ -185,33 +193,13 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
             deepgramConnection?.finish();
             deepgramConnection = null;
-            ws.send(JSON.stringify({ type: 'status', status: 'idle' }));
+            const idlePayload = JSON.stringify({ type: 'status', status: 'idle' });
+            ws.send(idlePayload);
+            deps.session.broadcastToReview(idlePayload);
 
             finalizeDeepgramCost();
             unsubscribeCost?.();
             unsubscribeCost = null;
-          } else if (message.type === 'reinstate') {
-            deps.session.ingestQueue = deps.session.ingestQueue
-              .then(() => handleReinstateFast(message.id, message.english, deps, ws, enqueuePublish))
-              .catch((error) => {
-                void logEvent('error', {
-                  event: 'reinstate_processing_failed',
-                  id: message.id,
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              });
-          } else if (message.type === 'admin-remove') {
-            deps.session.ingestQueue = deps.session.ingestQueue
-              .then(() => handleAdminRemove(message.id, deps, ws))
-              .catch((error) => {
-                void logEvent('error', {
-                  event: 'admin_remove_processing_failed',
-                  id: message.id,
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              });
-          } else if (message.type === 'set-mode') {
-            deps.session.mode = message.mode === 'manual' ? 'manual' : 'automatic';
           }
         } else if (deepgramConnection) {
           deepgramConnection.send(data as Buffer);
@@ -239,6 +227,70 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
     unsubscribeCost = null;
     finalizeDeepgramCost();
   });
+}
+
+function buildReviewBacklogLine(line: CaptionLine): Record<string, unknown> {
+  if (!line.suppressed) return { id: line.id, english: line.english };
+  return {
+    id: line.id,
+    english: line.english,
+    flagged: true,
+    reason: line.reason,
+    ...(line.pending ? { pending: true } : {}),
+  };
+}
+
+function handleReviewConnection(ws: WebSocket, deps: WsServerDeps): void {
+  const enqueuePublish = createEnqueuePublish(deps);
+
+  ws.send(
+    JSON.stringify({
+      type: 'backlog',
+      lines: deps.session.buffer.getRecent().map(buildReviewBacklogLine),
+      mode: deps.session.mode,
+      status: deps.session.isActive ? 'recording' : 'idle',
+    })
+  );
+  deps.session.addReview(ws);
+
+  ws.on('message', (data) => {
+    void (async () => {
+      try {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'reinstate') {
+          deps.session.ingestQueue = deps.session.ingestQueue
+            .then(() => handleReinstateFast(message.id, message.english, deps, ws, enqueuePublish))
+            .catch((error) => {
+              void logEvent('error', {
+                event: 'reinstate_processing_failed',
+                id: message.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+        } else if (message.type === 'admin-remove') {
+          deps.session.ingestQueue = deps.session.ingestQueue
+            .then(() => handleAdminRemove(message.id, deps, ws))
+            .catch((error) => {
+              void logEvent('error', {
+                event: 'admin_remove_processing_failed',
+                id: message.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+        } else if (message.type === 'set-mode') {
+          deps.session.mode = message.mode === 'manual' ? 'manual' : 'automatic';
+          deps.session.broadcastToReview(JSON.stringify({ type: 'mode', mode: deps.session.mode }));
+        }
+      } catch (error) {
+        void logEvent('error', {
+          event: 'review_message_error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+  });
+
+  ws.on('close', () => deps.session.removeReview(ws));
 }
 
 function logTranslationFallback(
@@ -329,18 +381,18 @@ async function handleReinstateFast(
   id: string,
   english: string,
   deps: WsServerDeps,
-  captureSocket: WebSocket,
+  requestingSocket: WebSocket,
   enqueuePublish: EnqueuePublish
 ): Promise<void> {
   const trimmed = english.trim();
   if (trimmed.length === 0) {
-    captureSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'empty text' }));
+    requestingSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'empty text' }));
     return;
   }
 
   const existing = deps.session.buffer.peek(id);
   if (existing === null || !existing.suppressed) {
-    captureSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'not found' }));
+    requestingSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'not found' }));
     return;
   }
 
@@ -351,11 +403,13 @@ async function handleReinstateFast(
 
   const line = deps.session.buffer.reinstate(id, trimmed);
   if (line === null) {
-    captureSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'not found' }));
+    requestingSocket.send(JSON.stringify({ type: 'reinstate-error', id, error: 'not found' }));
     return;
   }
 
-  captureSocket.send(JSON.stringify({ type: 'transcript', id: line.id, english: line.english }));
+  const payload = JSON.stringify({ type: 'transcript', id: line.id, english: line.english });
+  deps.session.captureSocket?.send(payload);
+  deps.session.broadcastToReview(payload);
 
   const workPromise = buildReinstateTranslation(
     deps,
@@ -368,16 +422,23 @@ async function handleReinstateFast(
   enqueuePublish(line, workPromise, 'caption-inserted');
 }
 
-async function handleAdminRemove(id: string, deps: WsServerDeps, captureSocket: WebSocket): Promise<void> {
+async function handleAdminRemove(id: string, deps: WsServerDeps, requestingSocket: WebSocket): Promise<void> {
   const line = deps.session.buffer.suppress(id);
   if (line === null) {
-    captureSocket.send(JSON.stringify({ type: 'admin-remove-error', id, error: 'not found' }));
+    requestingSocket.send(JSON.stringify({ type: 'admin-remove-error', id, error: 'not found' }));
     return;
   }
 
-  captureSocket.send(
-    JSON.stringify({ type: 'transcript', id: line.id, english: line.english, flagged: true, reason: 'Removed by admin' })
-  );
+  const payload = JSON.stringify({
+    type: 'transcript',
+    id: line.id,
+    english: line.english,
+    flagged: true,
+    reason: 'Removed by admin',
+  });
+  deps.session.captureSocket?.send(payload);
+  deps.session.broadcastToReview(payload);
+
   const removedPayload = JSON.stringify({ type: 'line-removed', id: line.id });
   for (const viewerSocket of deps.session.getAllViewers()) {
     viewerSocket.send(removedPayload);
@@ -401,8 +462,6 @@ async function handleFinalSegmentFast(
   const manualHold = deps.session.mode === 'manual';
   const suppressed = manualHold || !transcriptionResult.safe;
 
-  const line = deps.session.buffer.append(english, Date.now(), suppressed);
-
   if (suppressed) {
     if (!transcriptionResult.safe) {
       void logEvent('warn', { event: 'transcription_flagged', english, reason: transcriptionResult.reason });
@@ -412,16 +471,19 @@ async function handleFinalSegmentFast(
         ? 'Pending manual approval'
         : `Pending manual approval — AI also flagged: ${transcriptionResult.reason}`
       : transcriptionResult.reason;
-    captureSocket.send(
-      JSON.stringify({
-        type: 'transcript',
-        id: line.id,
-        english,
-        flagged: true,
-        reason,
-        ...(manualHold ? { pending: true } : {}),
-      })
-    );
+    const line = deps.session.buffer.append(english, Date.now(), true, undefined, manualHold ? true : undefined, reason);
+
+    const payload = JSON.stringify({
+      type: 'transcript',
+      id: line.id,
+      english,
+      flagged: true,
+      reason,
+      ...(manualHold ? { pending: true } : {}),
+    });
+    captureSocket.send(payload);
+    deps.session.broadcastToReview(payload);
+
     const removedPayload = JSON.stringify({ type: 'line-removed', id: line.id });
     for (const viewerSocket of deps.session.getAllViewers()) {
       viewerSocket.send(removedPayload);
@@ -430,7 +492,11 @@ async function handleFinalSegmentFast(
     return;
   }
 
-  captureSocket.send(JSON.stringify({ type: 'transcript', id: line.id, english: line.english }));
+  const line = deps.session.buffer.append(english, Date.now(), false);
+  const payload = JSON.stringify({ type: 'transcript', id: line.id, english: line.english });
+  captureSocket.send(payload);
+  deps.session.broadcastToReview(payload);
+
   const activeLanguages = deps.session.getActiveLanguages();
   const workPromise = translateWithFallback(deps, english, activeLanguages, precedingContext);
   enqueuePublish(line, workPromise);

@@ -1148,7 +1148,10 @@ describe('wsServer', () => {
       viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
       await waitForMessage(viewerSocket); // backlog: []
 
-      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
+      reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
       // set-mode has no ack message, so give the real socket I/O a tick to
       // land before triggering onFinalSegment directly (see the same wait
       // used throughout the "manual approval mode" describe block below).
@@ -1163,7 +1166,7 @@ describe('wsServer', () => {
       // before pressing Enter) — this always pays a fresh, uncached translate
       // call, which is the case that used to stall the queue.
       const reinstateAckPromise = waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'reinstate', id: pendingAck.id, english: 'Edited line' }));
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: pendingAck.id, english: 'Edited line' }));
       const reinstateAck = await reinstateAckPromise;
       expect(reinstateAck).toEqual({ type: 'transcript', id: pendingAck.id, english: 'Edited line' });
 
@@ -1177,6 +1180,7 @@ describe('wsServer', () => {
       resolveReinstateTranslate({ text: '{"zh":"编辑后的行"}' });
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
 
     it('reinstates with unedited text: un-flags the capture line and broadcasts caption-inserted', async () => {
@@ -1192,6 +1196,9 @@ describe('wsServer', () => {
 
       const flagged = await flagALine(captureSocket, geminiClient);
 
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
         if (params.contents.includes('safety checker')) {
           return Promise.resolve({ text: '{"zh":{"safe":true,"reason":"ok"}}' });
@@ -1201,7 +1208,7 @@ describe('wsServer', () => {
 
       const ackPromise = waitForMessage(captureSocket);
       const insertedPromise = waitForMessage(viewerSocket);
-      captureSocket.send(JSON.stringify({ type: 'reinstate', id: flagged.id, english: flagged.english }));
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: flagged.id, english: flagged.english }));
 
       const ack = await ackPromise;
       expect(ack).toEqual({ type: 'transcript', id: flagged.id, english: flagged.english });
@@ -1214,6 +1221,7 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
 
     it('reinstates with edited text: stores the corrected wording, reflected in a later backlog', async () => {
@@ -1224,6 +1232,9 @@ describe('wsServer', () => {
 
       const flagged = await flagALine(captureSocket, geminiClient);
 
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
         if (params.contents.includes('safety checker')) {
           return Promise.resolve({ text: '{}' });
@@ -1232,7 +1243,7 @@ describe('wsServer', () => {
       });
 
       const ackPromise = waitForMessage(captureSocket);
-      captureSocket.send(
+      reviewSocket.send(
         JSON.stringify({ type: 'reinstate', id: flagged.id, english: 'Jesus is indeed the son of God' })
       );
       const ack = await ackPromise;
@@ -1250,6 +1261,7 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
 
     it('responds with reinstate-error for an unknown id and does not touch the buffer', async () => {
@@ -1258,14 +1270,18 @@ describe('wsServer', () => {
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      const errorPromise = waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'reinstate', id: 'no-such-id', english: 'text' }));
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
+      const errorPromise = waitForMessage(reviewSocket);
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: 'no-such-id', english: 'text' }));
       const error = await errorPromise;
 
       expect(error).toEqual({ type: 'reinstate-error', id: 'no-such-id', error: 'not found' });
       expect(session.buffer.getRecent()).toHaveLength(0);
 
       captureSocket.close();
+      reviewSocket.close();
     });
 
     it('responds with reinstate-error for a line that is not currently suppressed', async () => {
@@ -1276,13 +1292,17 @@ describe('wsServer', () => {
 
       const visible = session.buffer.append('Already visible', Date.now());
 
-      const errorPromise = waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'reinstate', id: visible.id, english: 'text' }));
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
+      const errorPromise = waitForMessage(reviewSocket);
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: visible.id, english: 'text' }));
       const error = await errorPromise;
 
       expect(error).toEqual({ type: 'reinstate-error', id: visible.id, error: 'not found' });
 
       captureSocket.close();
+      reviewSocket.close();
     });
 
     it('responds with reinstate-error for blank edited text and does not touch the buffer', async () => {
@@ -1293,14 +1313,18 @@ describe('wsServer', () => {
 
       const flagged = await flagALine(captureSocket, geminiClient);
 
-      const errorPromise = waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'reinstate', id: flagged.id, english: '   ' }));
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
+      const errorPromise = waitForMessage(reviewSocket);
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: flagged.id, english: '   ' }));
       const error = await errorPromise;
 
       expect(error).toEqual({ type: 'reinstate-error', id: flagged.id, error: 'empty text' });
       expect(session.buffer.getRecent().find((line) => line.id === flagged.id)?.suppressed).toBe(true);
 
       captureSocket.close();
+      reviewSocket.close();
     });
 
     it('uses the line\'s fixed position for translation context, not lines that arrived after it', async () => {
@@ -1321,13 +1345,16 @@ describe('wsServer', () => {
       const flagged = await flagALine(captureSocket, geminiClient);
       session.buffer.append('Later unrelated line', Date.now());
 
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
         if (params.contents.includes('safety checker')) return Promise.resolve({ text: '{}' });
         return Promise.resolve({ text: '{"zh":"你好"}' });
       });
 
       const ackPromise = waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'reinstate', id: flagged.id, english: flagged.english }));
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: flagged.id, english: flagged.english }));
       await ackPromise;
 
       const translateCall = (geminiClient.models.generateContent as any).mock.calls.find(isTranslateCall);
@@ -1336,6 +1363,7 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
   });
 
@@ -1532,6 +1560,9 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
       const flagged = await transcriptPromise;
 
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
         if (params.contents.includes('safety checker')) {
           return Promise.resolve({ text: '{"zh":{"safe":true,"reason":"ok"}}' });
@@ -1541,7 +1572,7 @@ describe('wsServer', () => {
 
       const ackPromise = waitForMessage(captureSocket);
       const insertedPromise = waitForMessage(firstViewer);
-      captureSocket.send(
+      reviewSocket.send(
         JSON.stringify({ type: 'reinstate', id: flagged.id, english: 'Jesus is indeed the son of God' })
       );
       await ackPromise;
@@ -1565,6 +1596,7 @@ describe('wsServer', () => {
       captureSocket.close();
       firstViewer.close();
       secondViewer.close();
+      reviewSocket.close();
     });
   });
 
@@ -1710,9 +1742,12 @@ describe('wsServer', () => {
 
       const line = session.buffer.getRecent()[0];
 
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
       const ackPromise = waitForMessage(captureSocket);
       const removedPromise = waitForMessage(viewerSocket);
-      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: line.id }));
+      reviewSocket.send(JSON.stringify({ type: 'admin-remove', id: line.id }));
 
       const ack = await ackPromise;
       expect(ack).toEqual({
@@ -1730,6 +1765,7 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
 
     it('responds with admin-remove-error for an unknown id and does not touch the buffer', async () => {
@@ -1738,14 +1774,18 @@ describe('wsServer', () => {
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      const errorPromise = waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: 'no-such-id' }));
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
+      const errorPromise = waitForMessage(reviewSocket);
+      reviewSocket.send(JSON.stringify({ type: 'admin-remove', id: 'no-such-id' }));
       const error = await errorPromise;
 
       expect(error).toEqual({ type: 'admin-remove-error', id: 'no-such-id', error: 'not found' });
       expect(session.buffer.getRecent()).toHaveLength(0);
 
       captureSocket.close();
+      reviewSocket.close();
     });
 
     it('responds with admin-remove-error for a line that is already suppressed', async () => {
@@ -1756,13 +1796,17 @@ describe('wsServer', () => {
 
       const flagged = session.buffer.append('Already hidden', Date.now(), true);
 
-      const errorPromise = waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: flagged.id }));
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
+      const errorPromise = waitForMessage(reviewSocket);
+      reviewSocket.send(JSON.stringify({ type: 'admin-remove', id: flagged.id }));
       const error = await errorPromise;
 
       expect(error).toEqual({ type: 'admin-remove-error', id: flagged.id, error: 'not found' });
 
       captureSocket.close();
+      reviewSocket.close();
     });
 
     it('an admin-removed line can subsequently be reinstated with corrected text', async () => {
@@ -1771,12 +1815,15 @@ describe('wsServer', () => {
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
       const transcriptPromise = waitForMessage(captureSocket);
       capturedCallbacks!.onFinalSegment('Hello everyone');
       const transcript = await transcriptPromise;
 
       const removeAckPromise = waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: transcript.id }));
+      reviewSocket.send(JSON.stringify({ type: 'admin-remove', id: transcript.id }));
       await removeAckPromise;
 
       const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
@@ -1786,7 +1833,7 @@ describe('wsServer', () => {
 
       const reinstateAckPromise = waitForMessage(captureSocket);
       const insertedPromise = waitForMessage(viewerSocket);
-      captureSocket.send(
+      reviewSocket.send(
         JSON.stringify({ type: 'reinstate', id: transcript.id, english: 'Hello everyone, corrected' })
       );
 
@@ -1803,6 +1850,7 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
 
     it('does not publish a caption to viewers for a line admin-removed while its translate call was still pending', async () => {
@@ -1837,6 +1885,9 @@ describe('wsServer', () => {
       const viewerMessages: any[] = [];
       viewerSocket.on('message', (data) => viewerMessages.push(JSON.parse(data.toString())));
 
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
       const transcriptPromise = waitForMessage(captureSocket);
       capturedCallbacks!.onFinalSegment('Hello everyone');
       const transcript = await transcriptPromise;
@@ -1844,7 +1895,7 @@ describe('wsServer', () => {
       // The line's translate call is still in flight (pendingTranslate is
       // unresolved) when the operator admin-removes it.
       const removeAckPromise = waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'admin-remove', id: transcript.id }));
+      reviewSocket.send(JSON.stringify({ type: 'admin-remove', id: transcript.id }));
       await removeAckPromise;
 
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1860,6 +1911,7 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
   });
 
@@ -1869,7 +1921,10 @@ describe('wsServer', () => {
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
-      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+      reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
 
       const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
       await waitForOpen(viewerSocket);
@@ -1901,6 +1956,7 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
 
     it('combines the AI flag reason with the manual-approval reason when both apply', async () => {
@@ -1915,7 +1971,10 @@ describe('wsServer', () => {
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+      reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
       // set-mode has no ack message, so (unlike other capture-socket messages
       // in this file) there's nothing to `waitForMessage` on to know the
       // server has processed it. Give the real socket I/O a tick to land
@@ -1937,6 +1996,7 @@ describe('wsServer', () => {
       });
 
       captureSocket.close();
+      reviewSocket.close();
     });
 
     it('switching from manual back to automatic mid-session only affects new lines, leaving already-pending lines suppressed', async () => {
@@ -1944,7 +2004,10 @@ describe('wsServer', () => {
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+      reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
       // See the comment in the previous test: set-mode has no ack, so give
       // the real socket I/O a tick to land before triggering onFinalSegment.
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1954,7 +2017,7 @@ describe('wsServer', () => {
       const firstTranscript = await firstTranscriptPromise;
       expect(firstTranscript.pending).toBe(true);
 
-      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'automatic' }));
+      reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'automatic' }));
       await new Promise((resolve) => setTimeout(resolve, 20));
 
       const secondTranscriptPromise = waitForMessage(captureSocket);
@@ -1967,6 +2030,7 @@ describe('wsServer', () => {
       expect(recent.find((line) => line.id === secondTranscript.id)?.suppressed).toBe(false);
 
       captureSocket.close();
+      reviewSocket.close();
     });
 
     it('approving an unedited manual-mode line reuses the cached translation instead of calling Gemini again', async () => {
@@ -1974,7 +2038,10 @@ describe('wsServer', () => {
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+      reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
 
       const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
       await waitForOpen(viewerSocket);
@@ -1991,7 +2058,7 @@ describe('wsServer', () => {
 
       const ackPromise = waitForMessage(captureSocket);
       const insertedPromise = waitForMessage(viewerSocket);
-      captureSocket.send(JSON.stringify({ type: 'reinstate', id: pending.id, english: pending.english }));
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: pending.id, english: pending.english }));
       await ackPromise;
       const inserted = await insertedPromise;
 
@@ -2009,6 +2076,7 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
 
     it('approving translates only languages that became active after the line was held, reusing the rest from cache', async () => {
@@ -2016,7 +2084,10 @@ describe('wsServer', () => {
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket);
-      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+      reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
       // set-mode has no ack message, so give the real socket I/O a tick to
       // land before triggering onFinalSegment directly (see the comment in
       // the "combines the AI flag reason..." test above).
@@ -2036,7 +2107,7 @@ describe('wsServer', () => {
 
       const ackPromise = waitForMessage(captureSocket);
       const insertedPromise = waitForMessage(viewerSocket);
-      captureSocket.send(JSON.stringify({ type: 'reinstate', id: pending.id, english: pending.english }));
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: pending.id, english: pending.english }));
       await ackPromise;
       const inserted = await insertedPromise;
 
@@ -2049,6 +2120,7 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
 
     it('editing the text before approving discards the cache and re-translates', async () => {
@@ -2062,7 +2134,9 @@ describe('wsServer', () => {
       viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
       await waitForMessage(viewerSocket); // backlog: []
 
-      captureSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+      reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
       // set-mode has no ack message, so give the real socket I/O a tick to
       // land before triggering onFinalSegment directly (see the comment in
       // the "combines the AI flag reason..." test above).
@@ -2090,7 +2164,7 @@ describe('wsServer', () => {
 
       const ackPromise = waitForMessage(captureSocket);
       const insertedPromise = waitForMessage(viewerSocket);
-      captureSocket.send(JSON.stringify({ type: 'reinstate', id: pending.id, english: 'Hello, everyone!' }));
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: pending.id, english: 'Hello, everyone!' }));
       await ackPromise;
       const inserted = await insertedPromise;
 
@@ -2103,6 +2177,7 @@ describe('wsServer', () => {
 
       captureSocket.close();
       viewerSocket.close();
+      reviewSocket.close();
     });
   });
 
@@ -2259,6 +2334,215 @@ describe('wsServer', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       expect(costTracker.recordDeepgramSeconds).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('review connection', () => {
+    it('sends a backlog snapshot with mode and status on connect', async () => {
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const backlog = await waitForMessage(reviewSocket);
+      expect(backlog).toEqual({ type: 'backlog', lines: [], mode: 'automatic', status: 'idle' });
+      reviewSocket.close();
+    });
+
+    it("includes a suppressed line's pending/reason in the backlog", async () => {
+      session.buffer.append('Visible', Date.now() - 2000);
+      session.buffer.append('Held for review', Date.now() - 1000, true, undefined, true, 'Pending manual approval');
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const backlog = await waitForMessage(reviewSocket);
+      expect(backlog).toEqual({
+        type: 'backlog',
+        lines: [
+          { id: expect.any(String), english: 'Visible' },
+          {
+            id: expect.any(String),
+            english: 'Held for review',
+            flagged: true,
+            reason: 'Pending manual approval',
+            pending: true,
+          },
+        ],
+        mode: 'automatic',
+        status: 'idle',
+      });
+      reviewSocket.close();
+    });
+
+    it('reports status: recording in the backlog once capture has started', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const backlog = await waitForMessage(reviewSocket);
+      expect(backlog).toMatchObject({ status: 'recording' });
+
+      captureSocket.close();
+      reviewSocket.close();
+    });
+
+    it('broadcasts a new transcript line to both the capture socket and a connected review socket', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
+      const captureAckPromise = waitForMessage(captureSocket);
+      const reviewAckPromise = waitForMessage(reviewSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const [captureAck, reviewAck] = await Promise.all([captureAckPromise, reviewAckPromise]);
+
+      expect(captureAck).toEqual({ type: 'transcript', id: expect.any(String), english: 'Hello everyone' });
+      expect(reviewAck).toEqual(captureAck);
+
+      captureSocket.close();
+      reviewSocket.close();
+    });
+
+    it('accepts reinstate from a review socket and broadcasts the result to the capture socket', async () => {
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":false,"reason":"likely mis-heard negation"}' });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const flaggedPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
+      const flagged = await flaggedPromise;
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
+      const captureReinstatePromise = waitForMessage(captureSocket);
+      const reviewReinstatePromise = waitForMessage(reviewSocket);
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: flagged.id, english: flagged.english }));
+      const [captureReinstate, reviewReinstate] = await Promise.all([captureReinstatePromise, reviewReinstatePromise]);
+
+      expect(captureReinstate).toEqual({ type: 'transcript', id: flagged.id, english: flagged.english });
+      expect(reviewReinstate).toEqual(captureReinstate);
+
+      captureSocket.close();
+      reviewSocket.close();
+    });
+
+    it('sends reinstate-error back only to the requesting review socket', async () => {
+      const reviewSocketA = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocketA); // backlog
+      const reviewSocketB = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocketB); // backlog
+
+      const errorPromise = waitForMessage(reviewSocketA);
+      const bMessages: any[] = [];
+      reviewSocketB.on('message', (data) => bMessages.push(JSON.parse(data.toString())));
+
+      reviewSocketA.send(JSON.stringify({ type: 'reinstate', id: 'does-not-exist', english: 'text' }));
+      const error = await errorPromise;
+      expect(error).toEqual({ type: 'reinstate-error', id: 'does-not-exist', error: 'not found' });
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(bMessages).toEqual([]);
+
+      reviewSocketA.close();
+      reviewSocketB.close();
+    });
+
+    it('accepts admin-remove from a review socket and broadcasts to viewers and the capture socket', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const ackPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const ack = await ackPromise;
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
+      const captureRemovePromise = waitForMessage(captureSocket);
+      const reviewRemovePromise = waitForMessage(reviewSocket);
+      const viewerRemovePromise = waitForMessage(viewerSocket);
+      reviewSocket.send(JSON.stringify({ type: 'admin-remove', id: ack.id }));
+      const [captureRemove, reviewRemove, viewerRemove] = await Promise.all([
+        captureRemovePromise,
+        reviewRemovePromise,
+        viewerRemovePromise,
+      ]);
+
+      expect(captureRemove).toEqual({
+        type: 'transcript',
+        id: ack.id,
+        english: 'Hello everyone',
+        flagged: true,
+        reason: 'Removed by admin',
+      });
+      expect(reviewRemove).toEqual(captureRemove);
+      expect(viewerRemove).toEqual({ type: 'line-removed', id: ack.id });
+
+      captureSocket.close();
+      reviewSocket.close();
+      viewerSocket.close();
+    });
+
+    it('broadcasts a mode change from one review socket to every other review socket', async () => {
+      const reviewSocketA = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocketA); // backlog
+      const reviewSocketB = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocketB); // backlog
+
+      const modePromiseA = waitForMessage(reviewSocketA);
+      const modePromiseB = waitForMessage(reviewSocketB);
+      reviewSocketA.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
+      const [modeA, modeB] = await Promise.all([modePromiseA, modePromiseB]);
+
+      expect(modeA).toEqual({ type: 'mode', mode: 'manual' });
+      expect(modeB).toEqual(modeA);
+      expect(session.mode).toBe('manual');
+
+      reviewSocketA.close();
+      reviewSocketB.close();
+    });
+
+    it('broadcasts cost updates to review sockets', async () => {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+
+      const costPromise = waitForMessage(reviewSocket);
+      costTracker.recordDeepgramSeconds(1);
+      const cost = await costPromise;
+      expect(cost.type).toBe('cost');
+
+      captureSocket.close();
+      reviewSocket.close();
+    });
+
+    it('removes a review socket from broadcast targets on close', async () => {
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForMessage(reviewSocket); // backlog
+      reviewSocket.close();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(session.getAllReview()).toEqual([]);
     });
   });
 });
