@@ -10,6 +10,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { useStoredValue } from '@/lib/useStoredValue';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001';
 const API_URL = WS_URL.replace(/^ws/, 'http');
@@ -98,17 +99,14 @@ export default function CapturePage() {
   const pendingQueue = transcriptLines.filter((line) => line.pending && !line.dismissed);
   const undownloadedFeedbackCount = viewerFeedback.filter((item) => !item.downloaded).length;
 
-  const [approveKey, setApproveKey] = useState('Enter');
-  const [rejectKey, setRejectKey] = useState(' ');
+  const storedApproveKey = useStoredValue('captureApproveKey');
+  const storedRejectKey = useStoredValue('captureRejectKey');
+  const [approveKeyOverride, setApproveKeyOverride] = useState<string | null>(null);
+  const [rejectKeyOverride, setRejectKeyOverride] = useState<string | null>(null);
+  const approveKey = approveKeyOverride ?? storedApproveKey ?? 'Enter';
+  const rejectKey = rejectKeyOverride ?? storedRejectKey ?? ' ';
   const [rebindingAction, setRebindingAction] = useState<'approve' | 'reject' | null>(null);
   const [rebindError, setRebindError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const storedApprove = window.localStorage.getItem('captureApproveKey');
-    const storedReject = window.localStorage.getItem('captureRejectKey');
-    if (storedApprove) setApproveKey(storedApprove);
-    if (storedReject) setRejectKey(storedReject);
-  }, []);
 
   function displayKey(key: string): string {
     return key === ' ' ? 'Space' : key;
@@ -125,10 +123,10 @@ export default function CapturePage() {
         return;
       }
       if (rebindingAction === 'approve') {
-        setApproveKey(key);
+        setApproveKeyOverride(key);
         window.localStorage.setItem('captureApproveKey', key);
       } else {
-        setRejectKey(key);
+        setRejectKeyOverride(key);
         window.localStorage.setItem('captureRejectKey', key);
       }
       setRebindError(null);

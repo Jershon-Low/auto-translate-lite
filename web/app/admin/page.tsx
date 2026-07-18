@@ -85,7 +85,6 @@ export default function AdminPage() {
   useEffect(() => {
     const stored = window.sessionStorage.getItem('adminPasscode');
     if (stored) {
-      setPasscode(stored);
       void loadAll(stored);
     }
   }, []);

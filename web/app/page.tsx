@@ -1,9 +1,10 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Languages } from 'lucide-react';
 import { TARGET_LANGUAGES } from '@/lib/languages';
+import { useStoredValue } from '@/lib/useStoredValue';
 import { Card, CardContent } from '@/components/ui/card';
 
 const STORAGE_KEY = 'auto-translate-lite:language';
@@ -11,28 +12,25 @@ const STORAGE_KEY = 'auto-translate-lite:language';
 function LandingPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [ready, setReady] = useState(false);
+  const isReset = searchParams.get('reset') === '1';
+  const storedLanguage = useStoredValue(STORAGE_KEY);
 
   useEffect(() => {
-    if (searchParams.get('reset') === '1') {
+    if (storedLanguage === undefined) return;
+    if (isReset) {
       window.localStorage.removeItem(STORAGE_KEY);
-      setReady(true);
-      return;
+    } else if (storedLanguage) {
+      router.replace(`/view?lang=${storedLanguage}`);
     }
-    const saved = window.localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      router.replace(`/view?lang=${saved}`);
-    } else {
-      setReady(true);
-    }
-  }, [router, searchParams]);
+  }, [isReset, storedLanguage, router]);
 
   function selectLanguage(code: string) {
     window.localStorage.setItem(STORAGE_KEY, code);
     router.push(`/view?lang=${code}`);
   }
 
-  if (!ready) return null;
+  const shouldShowGrid = storedLanguage !== undefined && (isReset || !storedLanguage);
+  if (!shouldShowGrid) return null;
 
   return (
     <main className="min-h-screen flex flex-col items-center justify-center gap-8 p-6">

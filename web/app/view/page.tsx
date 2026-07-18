@@ -1,6 +1,7 @@
 'use client';
 
 import { Suspense, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Download, Globe, Flag, ChevronDown, X } from 'lucide-react';
 import { useViewerSocket, type ViewerStatus } from '@/lib/useViewerSocket';
@@ -220,7 +221,7 @@ function ViewerPageContent() {
             {isExporting ? <Spinner className="size-3.5" data-icon="inline-start" /> : <Download data-icon="inline-start" />}
             {isExporting ? 'Generating…' : 'Download PDF'}
           </Button>
-          <Button variant="ghost" size="sm" nativeButton={false} render={<a href="/?reset=1" />}>
+          <Button variant="ghost" size="sm" nativeButton={false} render={<Link href="/?reset=1" />}>
             <Globe data-icon="inline-start" />
             Change language
           </Button>
