@@ -7,7 +7,10 @@ const API_URL = WS_URL.replace(/^ws/, 'http');
 
 type GeminiModelId = 'gemini-3.1-flash-lite' | 'gemini-3.5-flash';
 type Provider = 'gemini' | 'openrouter';
-type RoleModelSelection = { provider: 'gemini'; model: GeminiModelId } | { provider: 'openrouter'; model: string };
+type OpenRouterReasoningEffort = 'off' | 'low' | 'medium' | 'high';
+type RoleModelSelection =
+  | { provider: 'gemini'; model: GeminiModelId }
+  | { provider: 'openrouter'; model: string; reasoning?: OpenRouterReasoningEffort };
 type Role = 'transcriptionVerifier' | 'translation' | 'translationVerifier';
 
 interface ModelConfig {
@@ -36,6 +39,13 @@ const ROLE_LABELS: Record<Role, string> = {
 
 const ROLES: Role[] = ['transcriptionVerifier', 'translation', 'translationVerifier'];
 const GEMINI_MODEL_IDS: GeminiModelId[] = ['gemini-3.1-flash-lite', 'gemini-3.5-flash'];
+const REASONING_EFFORTS: OpenRouterReasoningEffort[] = ['off', 'low', 'medium', 'high'];
+const REASONING_LABELS: Record<OpenRouterReasoningEffort, string> = {
+  off: 'Off',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+};
 
 export default function AdminPage() {
   const [passcode, setPasscode] = useState('');
@@ -151,7 +161,7 @@ export default function AdminPage() {
       if (!response.ok) return;
       const data = await response.json();
       setOpenRouterModels(data.models);
-      setModelConfig({ ...modelConfig, [role]: { provider: 'openrouter', model } });
+      setModelConfig({ ...modelConfig, [role]: { ...modelConfig[role], model } });
       setNewModelInputs({ ...newModelInputs, [role]: '' });
       setModelSaveStatus('idle');
     } catch {
@@ -282,7 +292,7 @@ export default function AdminPage() {
                     <select
                       value={selection.model}
                       onChange={(event) => {
-                        setModelConfig({ ...modelConfig, [role]: { provider: 'openrouter', model: event.target.value } });
+                        setModelConfig({ ...modelConfig, [role]: { ...selection, model: event.target.value } });
                         setModelSaveStatus('idle');
                       }}
                       className="border rounded p-1 text-sm"
@@ -294,6 +304,27 @@ export default function AdminPage() {
                         </option>
                       ))}
                     </select>
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-muted-foreground">Thinking</label>
+                      <select
+                        value={selection.reasoning ?? 'off'}
+                        onChange={(event) => {
+                          const reasoning = event.target.value as OpenRouterReasoningEffort;
+                          setModelConfig({
+                            ...modelConfig,
+                            [role]: { ...selection, reasoning: reasoning === 'off' ? undefined : reasoning },
+                          });
+                          setModelSaveStatus('idle');
+                        }}
+                        className="border rounded p-1 text-sm"
+                      >
+                        {REASONING_EFFORTS.map((effort) => (
+                          <option key={effort} value={effort}>
+                            {REASONING_LABELS[effort]}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                     <div className="flex items-center gap-2">
                       <input
                         type="text"
