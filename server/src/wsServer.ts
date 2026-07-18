@@ -49,20 +49,28 @@ export interface WsServerDeps {
   modelConfigStore: ModelConfigStore;
   promptConfigStore: PromptConfigStore;
   translationFlagDisplayStore: TranslationFlagDisplayStore;
+  adminPasscode: string | undefined;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
   const wss = new WebSocketServer({ noServer: true });
 
   deps.httpServer.on('upgrade', (request, socket, head) => {
-    const { pathname } = new URL(request.url ?? '', 'http://localhost');
-    if (pathname === '/ws/capture' || pathname === '/ws/viewer' || pathname === '/ws/review') {
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request, pathname);
-      });
-    } else {
+    const { pathname, searchParams } = new URL(request.url ?? '', 'http://localhost');
+    if (pathname !== '/ws/capture' && pathname !== '/ws/viewer' && pathname !== '/ws/review') {
       socket.destroy();
+      return;
     }
+    if (pathname === '/ws/capture' || pathname === '/ws/review') {
+      const providedPasscode = searchParams.get('passcode');
+      if (!deps.adminPasscode || providedPasscode !== deps.adminPasscode) {
+        socket.destroy();
+        return;
+      }
+    }
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request, pathname);
+    });
   });
 
   wss.on('connection', (ws: WebSocket, _request: IncomingMessage, pathname: string) => {

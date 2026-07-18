@@ -84,6 +84,7 @@ attachWsServer({
   modelConfigStore,
   promptConfigStore,
   translationFlagDisplayStore,
+  adminPasscode: process.env.ADMIN_PASSCODE,
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;

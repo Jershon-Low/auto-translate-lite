@@ -48,7 +48,7 @@ export function createApp(deps: AppDeps): Express {
     res.json({ status: 'ok' });
   });
 
-  app.post('/sermon-doc', upload.single('file'), async (req, res) => {
+  app.post('/sermon-doc', adminAuth, upload.single('file'), async (req, res) => {
     if (!req.file) {
       res.status(400).json({ error: 'No file uploaded' });
       return;
@@ -66,12 +66,12 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
-  app.get('/feedback', async (_req, res) => {
+  app.get('/feedback', adminAuth, async (_req, res) => {
     const text = await deps.feedbackStore.read();
     res.json({ text });
   });
 
-  app.put('/feedback', async (req, res) => {
+  app.put('/feedback', adminAuth, async (req, res) => {
     const text = typeof req.body?.text === 'string' ? req.body.text : '';
     await deps.feedbackStore.write(text);
     res.json({ ok: true });
@@ -99,13 +99,13 @@ export function createApp(deps: AppDeps): Express {
     res.json({ ok: true });
   });
 
-  app.get('/viewer-feedback', (_req, res) => {
+  app.get('/viewer-feedback', adminAuth, (_req, res) => {
     res.json({ items: deps.viewerFeedbackStore.list() });
   });
 
   const VIEWER_FEEDBACK_CSV_HEADER = ['Timestamp', 'Language', 'English', 'Translated', 'Comment', 'Session ID'];
 
-  app.post('/viewer-feedback/:id/download', (req, res) => {
+  app.post('/viewer-feedback/:id/download', adminAuth, (req, res) => {
     const item = deps.viewerFeedbackStore.get(req.params.id);
     if (!item) {
       res.status(404).json({ error: 'Feedback item not found' });
@@ -120,7 +120,7 @@ export function createApp(deps: AppDeps): Express {
     res.send(csv);
   });
 
-  app.post('/viewer-feedback/download-all', (_req, res) => {
+  app.post('/viewer-feedback/download-all', adminAuth, (_req, res) => {
     const undownloaded = deps.viewerFeedbackStore.getUndownloaded();
     deps.viewerFeedbackStore.markDownloaded(undownloaded.map((item) => item.id));
     const csv = toCsv(

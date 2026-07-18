@@ -159,6 +159,7 @@ describe('wsServer', () => {
       modelConfigStore: fakeModelConfigStore(),
       promptConfigStore: fakePromptConfigStore(),
       translationFlagDisplayStore,
+      adminPasscode: 'test-passcode',
     });
 
     await new Promise<void>((resolve) => httpServer.listen(0, resolve));
@@ -170,7 +171,7 @@ describe('wsServer', () => {
   });
 
   it('broadcasts a translated caption to a subscribed viewer', async () => {
-    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);
     captureSocket.send(JSON.stringify({ type: 'start' }));
     await waitForMessage(captureSocket); // status: recording
@@ -191,7 +192,7 @@ describe('wsServer', () => {
   });
 
   it('includes up to the last 7 preceding lines as translation context', async () => {
-    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);
     captureSocket.send(JSON.stringify({ type: 'start' }));
     await waitForMessage(captureSocket); // status: recording
@@ -229,7 +230,7 @@ describe('wsServer', () => {
   });
 
   it('sends translated backlog to a viewer joining after segments already arrived', async () => {
-    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);
     captureSocket.send(JSON.stringify({ type: 'start' }));
     await waitForMessage(captureSocket); // status: recording
@@ -254,7 +255,7 @@ describe('wsServer', () => {
   });
 
   it('survives a malformed non-binary frame instead of crashing the connection', async () => {
-    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);
 
     // Malformed JSON must not throw uncaught inside the message handler.
@@ -269,7 +270,7 @@ describe('wsServer', () => {
   });
 
   it('does not fan out a live caption to a viewer until its backlog has been sent', async () => {
-    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);
     captureSocket.send(JSON.stringify({ type: 'start' }));
     await waitForMessage(captureSocket); // status: recording
@@ -340,7 +341,7 @@ describe('wsServer', () => {
     });
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);
     captureSocket.send(JSON.stringify({ type: 'start' }));
     await waitForMessage(captureSocket); // status: recording
@@ -375,7 +376,7 @@ describe('wsServer', () => {
       return Promise.resolve({ text: '{"zh":"你好"}' });
     });
 
-    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);
     captureSocket.send(JSON.stringify({ type: 'start' }));
     await waitForMessage(captureSocket); // status: recording
@@ -417,7 +418,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好2"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -468,7 +469,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好2"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -504,7 +505,7 @@ describe('wsServer', () => {
     });
 
     it('prefetches translations for a suppressed line in the background without publishing them', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -546,7 +547,7 @@ describe('wsServer', () => {
   it('falls back to English in the backlog when the verifier flags a line as unsafe', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);
     captureSocket.send(JSON.stringify({ type: 'start' }));
     await waitForMessage(captureSocket); // status: recording
@@ -586,7 +587,7 @@ describe('wsServer', () => {
       return Promise.resolve({ text: '{"translations":["较早的一行"]}' });
     });
 
-    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);
     captureSocket.send(JSON.stringify({ type: 'start' }));
     await waitForMessage(captureSocket); // status: recording
@@ -610,7 +611,7 @@ describe('wsServer', () => {
 
   describe('per-role context caching', () => {
     it('creates a cache for every role on start once there is enough sermon material to clear Gemini\'s 1024-token cache minimum', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -626,7 +627,7 @@ describe('wsServer', () => {
     it('skips cache creation for every role — without ever calling Gemini — when there is no sermon document or feedback text, since fixed rules + notes alone fall well under the 1024-token minimum', async () => {
       (feedbackStore.read as ReturnType<typeof vi.fn>).mockResolvedValue('');
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -643,7 +644,7 @@ describe('wsServer', () => {
         `Cain should translate to 该隐 in Chinese. ${CACHE_PADDING}`
       );
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -665,7 +666,7 @@ describe('wsServer', () => {
     });
 
     it('deletes every role\'s cache on stop', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket);
@@ -680,7 +681,7 @@ describe('wsServer', () => {
     });
 
     it('rebuilds all three caches on a second start (reconnect)', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
 
       captureSocket.send(JSON.stringify({ type: 'start' }));
@@ -716,7 +717,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -776,7 +777,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -826,7 +827,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -890,7 +891,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -949,7 +950,7 @@ describe('wsServer', () => {
       });
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -997,7 +998,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1015,7 +1016,7 @@ describe('wsServer', () => {
     });
 
     it('does not mark a safe line as flagged in the transcript event', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1039,7 +1040,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1064,7 +1065,7 @@ describe('wsServer', () => {
     });
 
     it('gives a viewer joining while a line is suppressed a placeholder at the correct position', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1134,7 +1135,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1148,7 +1149,7 @@ describe('wsServer', () => {
       viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
       await waitForMessage(viewerSocket); // backlog: []
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
@@ -1184,7 +1185,7 @@ describe('wsServer', () => {
     });
 
     it('reinstates with unedited text: un-flags the capture line and broadcasts caption-inserted', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1196,7 +1197,7 @@ describe('wsServer', () => {
 
       const flagged = await flagALine(captureSocket, geminiClient);
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
@@ -1225,14 +1226,14 @@ describe('wsServer', () => {
     });
 
     it('reinstates with edited text: stores the corrected wording, reflected in a later backlog', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
       const flagged = await flagALine(captureSocket, geminiClient);
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
@@ -1265,12 +1266,12 @@ describe('wsServer', () => {
     });
 
     it('responds with reinstate-error for an unknown id and does not touch the buffer', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const errorPromise = waitForMessage(reviewSocket);
@@ -1285,14 +1286,14 @@ describe('wsServer', () => {
     });
 
     it('responds with reinstate-error for a line that is not currently suppressed', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
       const visible = session.buffer.append('Already visible', Date.now());
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const errorPromise = waitForMessage(reviewSocket);
@@ -1306,14 +1307,14 @@ describe('wsServer', () => {
     });
 
     it('responds with reinstate-error for blank edited text and does not touch the buffer', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
       const flagged = await flagALine(captureSocket, geminiClient);
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const errorPromise = waitForMessage(reviewSocket);
@@ -1328,7 +1329,7 @@ describe('wsServer', () => {
     });
 
     it('uses the line\'s fixed position for translation context, not lines that arrived after it', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1345,7 +1346,7 @@ describe('wsServer', () => {
       const flagged = await flagALine(captureSocket, geminiClient);
       session.buffer.append('Later unrelated line', Date.now());
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
@@ -1369,7 +1370,7 @@ describe('wsServer', () => {
 
   describe('translation cache (viewer subscribe burst fix)', () => {
     it('caches the live-published translation for each active language', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1401,7 +1402,7 @@ describe('wsServer', () => {
       });
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1423,7 +1424,7 @@ describe('wsServer', () => {
     });
 
     it('does not cache anything for a language with no translation at all for that line', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1446,7 +1447,7 @@ describe('wsServer', () => {
     });
 
     it('serves a second subscriber to an already-active language from cache, without additional Gemini calls', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1479,7 +1480,7 @@ describe('wsServer', () => {
     });
 
     it('coalesces two concurrent first-time subscribes to the same new language into one backlog fill', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1540,7 +1541,7 @@ describe('wsServer', () => {
     });
 
     it('a viewer subscribing after a reinstated correction sees the cached corrected translation, with no extra Gemini calls', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1560,7 +1561,7 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
       const flagged = await transcriptPromise;
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
@@ -1614,7 +1615,7 @@ describe('wsServer', () => {
       });
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1663,7 +1664,7 @@ describe('wsServer', () => {
     it('flag mode: a safe translation is delivered exactly as in hide mode, with no flagged/reason fields', async () => {
       (translationFlagDisplayStore.read as ReturnType<typeof vi.fn>).mockResolvedValue({ mode: 'flag' });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1688,7 +1689,7 @@ describe('wsServer', () => {
     it('flag mode: an unsafe backlog-fill translation is cached flagged and delivered with the reason', async () => {
       (translationFlagDisplayStore.read as ReturnType<typeof vi.fn>).mockResolvedValue({ mode: 'flag' });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1724,7 +1725,7 @@ describe('wsServer', () => {
 
   describe('admin-remove', () => {
     it('suppresses a live line, acks the capture socket with a "Removed by admin" reason, and broadcasts line-removed to viewers', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1742,7 +1743,7 @@ describe('wsServer', () => {
 
       const line = session.buffer.getRecent()[0];
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const ackPromise = waitForMessage(captureSocket);
@@ -1769,12 +1770,12 @@ describe('wsServer', () => {
     });
 
     it('responds with admin-remove-error for an unknown id and does not touch the buffer', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const errorPromise = waitForMessage(reviewSocket);
@@ -1789,14 +1790,14 @@ describe('wsServer', () => {
     });
 
     it('responds with admin-remove-error for a line that is already suppressed', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
       const flagged = session.buffer.append('Already hidden', Date.now(), true);
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const errorPromise = waitForMessage(reviewSocket);
@@ -1810,12 +1811,12 @@ describe('wsServer', () => {
     });
 
     it('an admin-removed line can subsequently be reinstated with corrected text', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const transcriptPromise = waitForMessage(captureSocket);
@@ -1872,7 +1873,7 @@ describe('wsServer', () => {
         return pendingTranslate;
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -1885,7 +1886,7 @@ describe('wsServer', () => {
       const viewerMessages: any[] = [];
       viewerSocket.on('message', (data) => viewerMessages.push(JSON.parse(data.toString())));
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const transcriptPromise = waitForMessage(captureSocket);
@@ -1917,12 +1918,12 @@ describe('wsServer', () => {
 
   describe('manual approval mode', () => {
     it('suppresses every safe line as pending when the session is in manual mode', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
       reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
 
@@ -1967,12 +1968,12 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket);
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
       reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
       // set-mode has no ack message, so (unlike other capture-socket messages
@@ -2000,12 +2001,12 @@ describe('wsServer', () => {
     });
 
     it('switching from manual back to automatic mid-session only affects new lines, leaving already-pending lines suppressed', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket);
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
       reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
       // See the comment in the previous test: set-mode has no ack, so give
@@ -2034,12 +2035,12 @@ describe('wsServer', () => {
     });
 
     it('approving an unedited manual-mode line reuses the cached translation instead of calling Gemini again', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket);
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
       reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
 
@@ -2080,12 +2081,12 @@ describe('wsServer', () => {
     });
 
     it('approving translates only languages that became active after the line was held, reusing the rest from cache', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket);
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
       reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
       // set-mode has no ack message, so give the real socket I/O a tick to
@@ -2124,7 +2125,7 @@ describe('wsServer', () => {
     });
 
     it('editing the text before approving discards the cache and re-translates', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket);
@@ -2134,7 +2135,7 @@ describe('wsServer', () => {
       viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
       await waitForMessage(viewerSocket); // backlog: []
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
       reviewSocket.send(JSON.stringify({ type: 'set-mode', mode: 'manual' }));
       // set-mode has no ack message, so give the real socket I/O a tick to
@@ -2201,7 +2202,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -2231,7 +2232,7 @@ describe('wsServer', () => {
 
   describe('cost tracking', () => {
     it('resets the session cost tracker and subscribes to updates when a capture session starts', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -2243,7 +2244,7 @@ describe('wsServer', () => {
     });
 
     it('sends a cost update to the capture socket whenever the tracker reports new totals', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -2258,7 +2259,7 @@ describe('wsServer', () => {
     });
 
     it('sends status:idle before the final cost update on stop, and records Deepgram seconds', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -2287,7 +2288,7 @@ describe('wsServer', () => {
     });
 
     it('stops sending cost updates after stop, even if the tracker fires again', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -2308,7 +2309,7 @@ describe('wsServer', () => {
     });
 
     it('records Deepgram seconds on an abrupt close without an explicit stop', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -2323,7 +2324,7 @@ describe('wsServer', () => {
     });
 
     it('does not double-record Deepgram seconds when close fires after an explicit stop', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -2339,7 +2340,7 @@ describe('wsServer', () => {
 
   describe('review connection', () => {
     it('sends a backlog snapshot with mode and status on connect', async () => {
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       const backlog = await waitForMessage(reviewSocket);
       expect(backlog).toEqual({ type: 'backlog', lines: [], mode: 'automatic', status: 'idle' });
       reviewSocket.close();
@@ -2349,7 +2350,7 @@ describe('wsServer', () => {
       session.buffer.append('Visible', Date.now() - 2000);
       session.buffer.append('Held for review', Date.now() - 1000, true, undefined, true, 'Pending manual approval');
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       const backlog = await waitForMessage(reviewSocket);
       expect(backlog).toEqual({
         type: 'backlog',
@@ -2370,12 +2371,12 @@ describe('wsServer', () => {
     });
 
     it('reports status: recording in the backlog once capture has started', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       const backlog = await waitForMessage(reviewSocket);
       expect(backlog).toMatchObject({ status: 'recording' });
 
@@ -2384,12 +2385,12 @@ describe('wsServer', () => {
     });
 
     it('broadcasts a new transcript line to both the capture socket and a connected review socket', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const captureAckPromise = waitForMessage(captureSocket);
@@ -2412,7 +2413,7 @@ describe('wsServer', () => {
         return Promise.resolve({ text: '{"zh":"你好"}' });
       });
 
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -2421,7 +2422,7 @@ describe('wsServer', () => {
       capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
       const flagged = await flaggedPromise;
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const captureReinstatePromise = waitForMessage(captureSocket);
@@ -2437,9 +2438,9 @@ describe('wsServer', () => {
     });
 
     it('sends reinstate-error back only to the requesting review socket', async () => {
-      const reviewSocketA = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocketA = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocketA); // backlog
-      const reviewSocketB = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocketB = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocketB); // backlog
 
       const errorPromise = waitForMessage(reviewSocketA);
@@ -2458,7 +2459,7 @@ describe('wsServer', () => {
     });
 
     it('accepts admin-remove from a review socket and broadcasts to viewers and the capture socket', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
@@ -2472,7 +2473,7 @@ describe('wsServer', () => {
       viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
       await waitForMessage(viewerSocket); // backlog
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const captureRemovePromise = waitForMessage(captureSocket);
@@ -2501,9 +2502,9 @@ describe('wsServer', () => {
     });
 
     it('broadcasts a mode change from one review socket to every other review socket', async () => {
-      const reviewSocketA = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocketA = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocketA); // backlog
-      const reviewSocketB = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocketB = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocketB); // backlog
 
       const modePromiseA = waitForMessage(reviewSocketA);
@@ -2520,12 +2521,12 @@ describe('wsServer', () => {
     });
 
     it('broadcasts cost updates to review sockets', async () => {
-      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
 
       const costPromise = waitForMessage(reviewSocket);
@@ -2538,11 +2539,41 @@ describe('wsServer', () => {
     });
 
     it('removes a review socket from broadcast targets on close', async () => {
-      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
       await waitForMessage(reviewSocket); // backlog
       reviewSocket.close();
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(session.getAllReview()).toEqual([]);
+    });
+  });
+
+  describe('capture/review passcode gate', () => {
+    function waitForCloseOrError(ws: WebSocket): Promise<void> {
+      return new Promise((resolve) => {
+        ws.once('close', () => resolve());
+        ws.once('error', () => resolve());
+      });
+    }
+
+    it('destroys a /ws/capture upgrade with no passcode', async () => {
+      const socket = new WebSocket(`ws://localhost:${port}/ws/capture`);
+      await waitForCloseOrError(socket);
+    });
+
+    it('destroys a /ws/capture upgrade with the wrong passcode', async () => {
+      const socket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=wrong`);
+      await waitForCloseOrError(socket);
+    });
+
+    it('destroys a /ws/review upgrade with no passcode', async () => {
+      const socket = new WebSocket(`ws://localhost:${port}/ws/review`);
+      await waitForCloseOrError(socket);
+    });
+
+    it('does not require a passcode for /ws/viewer', async () => {
+      const socket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(socket);
+      socket.close();
     });
   });
 });

@@ -59,6 +59,7 @@ describe('POST /sermon-doc', () => {
     const deps = testDeps();
     const response = await request(createApp(deps))
       .post('/sermon-doc')
+      .set('x-admin-passcode', 'test-passcode')
       .attach('file', Buffer.from('fake pdf bytes'), { filename: 'sermon.pdf', contentType: 'application/pdf' });
 
     expect(response.status).toBe(200);
@@ -67,7 +68,9 @@ describe('POST /sermon-doc', () => {
   });
 
   it('returns 400 when no file is attached', async () => {
-    const response = await request(createApp(testDeps())).post('/sermon-doc');
+    const response = await request(createApp(testDeps()))
+      .post('/sermon-doc')
+      .set('x-admin-passcode', 'test-passcode');
     expect(response.status).toBe(400);
   });
 
@@ -75,6 +78,7 @@ describe('POST /sermon-doc', () => {
     (extractDocumentText as ReturnType<typeof vi.fn>).mockResolvedValueOnce('');
     const response = await request(createApp(testDeps()))
       .post('/sermon-doc')
+      .set('x-admin-passcode', 'test-passcode')
       .attach('file', Buffer.from('fake'), { filename: 'sermon.pdf', contentType: 'application/pdf' });
     expect(response.status).toBe(400);
   });
@@ -85,6 +89,7 @@ describe('POST /sermon-doc', () => {
     );
     const response = await request(createApp(testDeps()))
       .post('/sermon-doc')
+      .set('x-admin-passcode', 'test-passcode')
       .attach('file', Buffer.from('fake'), { filename: 'sermon.txt', contentType: 'text/plain' });
     expect(response.status).toBe(400);
     expect(response.body).toEqual({ error: 'Unsupported document type: text/plain' });
@@ -93,7 +98,9 @@ describe('POST /sermon-doc', () => {
 
 describe('GET/PUT /feedback', () => {
   it('returns an empty string when nothing has been saved yet', async () => {
-    const response = await request(createApp(testDeps())).get('/feedback');
+    const response = await request(createApp(testDeps()))
+      .get('/feedback')
+      .set('x-admin-passcode', 'test-passcode');
     expect(response.body).toEqual({ text: '' });
   });
 
@@ -101,11 +108,26 @@ describe('GET/PUT /feedback', () => {
     const deps = testDeps();
     const app = createApp(deps);
 
-    const putResponse = await request(app).put('/feedback').send({ text: 'Cain -> 该隐' });
+    const putResponse = await request(app)
+      .put('/feedback')
+      .set('x-admin-passcode', 'test-passcode')
+      .send({ text: 'Cain -> 该隐' });
     expect(putResponse.status).toBe(200);
 
-    const getResponse = await request(app).get('/feedback');
+    const getResponse = await request(app).get('/feedback').set('x-admin-passcode', 'test-passcode');
     expect(getResponse.body).toEqual({ text: 'Cain -> 该隐' });
+  });
+
+  it('returns 401 without the passcode header', async () => {
+    const response = await request(createApp(testDeps())).get('/feedback');
+    expect(response.status).toBe(401);
+  });
+
+  it('succeeds with the correct passcode header', async () => {
+    const response = await request(createApp(testDeps()))
+      .get('/feedback')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(200);
   });
 });
 
@@ -160,7 +182,9 @@ describe('POST /viewer-feedback', () => {
 
 describe('GET /viewer-feedback', () => {
   it('returns an empty list when nothing has been submitted yet', async () => {
-    const response = await request(createApp(testDeps())).get('/viewer-feedback');
+    const response = await request(createApp(testDeps()))
+      .get('/viewer-feedback')
+      .set('x-admin-passcode', 'test-passcode');
     expect(response.body).toEqual({ items: [] });
   });
 
@@ -170,14 +194,16 @@ describe('GET /viewer-feedback', () => {
     await request(app).post('/viewer-feedback').send({ language: 'ja', lineIndex: 0, english: 'A', translated: 'あ' });
     await request(app).post('/viewer-feedback').send({ language: 'ja', lineIndex: 1, english: 'B', translated: 'い' });
 
-    const response = await request(app).get('/viewer-feedback');
+    const response = await request(app).get('/viewer-feedback').set('x-admin-passcode', 'test-passcode');
     expect(response.body.items.map((item: { english: string }) => item.english)).toEqual(['B', 'A']);
   });
 });
 
 describe('POST /viewer-feedback/:id/download', () => {
   it('returns 404 for an unknown id', async () => {
-    const response = await request(createApp(testDeps())).post('/viewer-feedback/does-not-exist/download');
+    const response = await request(createApp(testDeps()))
+      .post('/viewer-feedback/does-not-exist/download')
+      .set('x-admin-passcode', 'test-passcode');
     expect(response.status).toBe(404);
   });
 
@@ -193,7 +219,9 @@ describe('POST /viewer-feedback/:id/download', () => {
     });
     const [{ id }] = deps.viewerFeedbackStore.list();
 
-    const response = await request(app).post(`/viewer-feedback/${id}/download`);
+    const response = await request(app)
+      .post(`/viewer-feedback/${id}/download`)
+      .set('x-admin-passcode', 'test-passcode');
 
     expect(response.status).toBe(200);
     expect(response.headers['content-type']).toContain('text/csv');
@@ -209,7 +237,9 @@ describe('POST /viewer-feedback/:id/download', () => {
     await request(app).post('/viewer-feedback').send({ language: 'fr', lineIndex: 0, english: 'A', translated: 'a' });
     const [{ id }] = deps.viewerFeedbackStore.list();
 
-    const response = await request(app).post(`/viewer-feedback/${id}/download`);
+    const response = await request(app)
+      .post(`/viewer-feedback/${id}/download`)
+      .set('x-admin-passcode', 'test-passcode');
 
     expect(response.headers['access-control-expose-headers']).toContain('Content-Disposition');
   });
@@ -217,7 +247,9 @@ describe('POST /viewer-feedback/:id/download', () => {
 
 describe('POST /viewer-feedback/download-all', () => {
   it('returns a header-only CSV when nothing is undownloaded', async () => {
-    const response = await request(createApp(testDeps())).post('/viewer-feedback/download-all');
+    const response = await request(createApp(testDeps()))
+      .post('/viewer-feedback/download-all')
+      .set('x-admin-passcode', 'test-passcode');
     expect(response.status).toBe(200);
     expect(response.text).toBe('Timestamp,Language,English,Translated,Comment,Session ID\r\n');
   });
@@ -229,14 +261,46 @@ describe('POST /viewer-feedback/download-all', () => {
     await request(app).post('/viewer-feedback').send({ language: 'ja', lineIndex: 1, english: 'Beta line', translated: 'い' });
     const items = deps.viewerFeedbackStore.list(); // newest first: Beta, then Alpha
     const alphaId = items.find((item) => item.english === 'Alpha line')!.id;
-    await request(app).post(`/viewer-feedback/${alphaId}/download`); // marks Alpha downloaded
+    await request(app)
+      .post(`/viewer-feedback/${alphaId}/download`)
+      .set('x-admin-passcode', 'test-passcode'); // marks Alpha downloaded
 
-    const response = await request(app).post('/viewer-feedback/download-all');
+    const response = await request(app)
+      .post('/viewer-feedback/download-all')
+      .set('x-admin-passcode', 'test-passcode');
 
     expect(response.status).toBe(200);
     expect(response.text).toContain('Beta line');
     expect(response.text).not.toContain('Alpha line');
     expect(deps.viewerFeedbackStore.list().every((item) => item.downloaded)).toBe(true);
+  });
+});
+
+describe('gated review routes', () => {
+  it('POST /viewer-feedback stays open (used by the public /view page)', async () => {
+    const response = await request(createApp(testDeps()))
+      .post('/viewer-feedback')
+      .send({ language: 'es', lineIndex: 0, english: 'Hi', translated: 'Hola' });
+    expect(response.status).toBe(200);
+  });
+
+  it('GET /viewer-feedback requires the passcode', async () => {
+    const response = await request(createApp(testDeps())).get('/viewer-feedback');
+    expect(response.status).toBe(401);
+  });
+
+  it('GET /viewer-feedback succeeds with the passcode', async () => {
+    const response = await request(createApp(testDeps()))
+      .get('/viewer-feedback')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(200);
+  });
+
+  it('POST /sermon-doc requires the passcode', async () => {
+    const response = await request(createApp(testDeps()))
+      .post('/sermon-doc')
+      .attach('file', Buffer.from('fake pdf bytes'), { filename: 'sermon.pdf', contentType: 'application/pdf' });
+    expect(response.status).toBe(401);
   });
 });
 
