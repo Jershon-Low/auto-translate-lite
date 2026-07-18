@@ -23,10 +23,11 @@ export interface OpenRouterChatCompletionParams {
   model: string;
   messages: OpenRouterMessage[];
   response_format: OpenRouterResponseFormat;
+  reasoning?: { effort: 'low' | 'medium' | 'high' };
 }
 
 export interface OpenRouterChatCompletionResponse {
-  choices: Array<{ message: { content: string | null } }>;
+  choices: Array<{ message: { content: string | null; reasoning?: string } }>;
   usage?: OpenRouterUsage;
 }
 

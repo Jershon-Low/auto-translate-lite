@@ -120,4 +120,42 @@ describe('OpenRouterProvider', () => {
     await expect(provider.translate('Hello', ['zh'], [], null)).rejects.toThrow('401 Unauthorized');
     expect(client.chat.completions.create).toHaveBeenCalledTimes(1);
   });
+
+  it('includes reasoning.effort in the request when configured', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    const provider = new OpenRouterProvider(client, 'qwen/qwen3.6-flash', 'notes', 'high');
+    await provider.translate('Hello', ['zh'], [], null);
+    const call = (client.chat.completions.create as any).mock.calls[0][0];
+    expect(call.reasoning).toEqual({ effort: 'high' });
+  });
+
+  it('omits the reasoning key when reasoning is "off" or unset', async () => {
+    const client = fakeClient('{"zh":"你好"}');
+    const providerOff = new OpenRouterProvider(client, 'qwen/qwen3.6-flash', 'notes', 'off');
+    await providerOff.translate('Hello', ['zh'], [], null);
+    const offCall = (client.chat.completions.create as any).mock.calls[0][0];
+    expect(offCall.reasoning).toBeUndefined();
+
+    const providerUnset = new OpenRouterProvider(client, 'qwen/qwen3.6-flash', 'notes');
+    await providerUnset.translate('Hello', ['zh'], [], null);
+    const unsetCall = (client.chat.completions.create as any).mock.calls[1][0];
+    expect(unsetCall.reasoning).toBeUndefined();
+  });
+
+  it('includes reasoning.effort in the json_object fallback retry as well', async () => {
+    const client: OpenRouterClient = {
+      chat: {
+        completions: {
+          create: vi
+            .fn()
+            .mockRejectedValueOnce(new Error('400 Invalid parameter: response_format is not supported for this model'))
+            .mockResolvedValueOnce({ choices: [{ message: { content: '{"zh":"你好"}' } }] }),
+        },
+      },
+    };
+    const provider = new OpenRouterProvider(client, 'some-model', 'notes', 'medium');
+    await provider.translate('Hello', ['zh'], [], null);
+    const secondCall = (client.chat.completions.create as any).mock.calls[1][0];
+    expect(secondCall.reasoning).toEqual({ effort: 'medium' });
+  });
 });
