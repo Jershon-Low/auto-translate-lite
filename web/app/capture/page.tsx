@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Lock } from 'lucide-react';
+import { useStoredValue } from '@/lib/useStoredValue';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001';
 const API_URL = WS_URL.replace(/^ws/, 'http');
@@ -38,11 +39,14 @@ function StatusBadge({ status }: { status: CaptureStatus }) {
 }
 
 export default function CapturePage() {
-  const [passcode, setPasscode] = useState('');
+  const storedPasscode = useStoredValue('adminPasscode', 'session');
   const [enteredPasscode, setEnteredPasscode] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
-  const [authorized, setAuthorized] = useState(false);
+  const [authorizedPasscodeOverride, setAuthorizedPasscodeOverride] = useState<string | null>(null);
   const [checkingAuth, setCheckingAuth] = useState(false);
+
+  const passcode = authorizedPasscodeOverride ?? storedPasscode ?? '';
+  const authorized = authorizedPasscodeOverride !== null || Boolean(storedPasscode);
 
   const [status, setStatus] = useState<CaptureStatus>('idle');
   const [transcriptLines, setTranscriptLines] = useState<TranscriptLine[]>([]);
@@ -54,14 +58,6 @@ export default function CapturePage() {
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const [isFollowing, setIsFollowing] = useState(true);
-
-  useEffect(() => {
-    const stored = window.sessionStorage.getItem('adminPasscode');
-    if (stored) {
-      setPasscode(stored);
-      setAuthorized(true);
-    }
-  }, []);
 
   async function submitPasscode() {
     setCheckingAuth(true);
@@ -75,8 +71,7 @@ export default function CapturePage() {
         return;
       }
       window.sessionStorage.setItem('adminPasscode', enteredPasscode);
-      setPasscode(enteredPasscode);
-      setAuthorized(true);
+      setAuthorizedPasscodeOverride(enteredPasscode);
     } catch {
       setAuthError('Could not reach the server. Check your connection and try again.');
     } finally {

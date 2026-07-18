@@ -65,11 +65,14 @@ function StatusBadge({ status }: { status: SessionStatus }) {
 }
 
 export default function ReviewPage() {
-  const [passcode, setPasscode] = useState('');
+  const storedPasscode = useStoredValue('adminPasscode', 'session');
   const [enteredPasscode, setEnteredPasscode] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
-  const [authorized, setAuthorized] = useState(false);
+  const [authorizedPasscodeOverride, setAuthorizedPasscodeOverride] = useState<string | null>(null);
   const [checkingAuth, setCheckingAuth] = useState(false);
+
+  const passcode = authorizedPasscodeOverride ?? storedPasscode ?? '';
+  const authorized = authorizedPasscodeOverride !== null || Boolean(storedPasscode);
 
   const [status, setStatus] = useState<SessionStatus>('idle');
   const [transcriptLines, setTranscriptLines] = useState<TranscriptLine[]>([]);
@@ -112,14 +115,6 @@ export default function ReviewPage() {
     return key === ' ' ? 'Space' : key;
   }
 
-  useEffect(() => {
-    const stored = window.sessionStorage.getItem('adminPasscode');
-    if (stored) {
-      setPasscode(stored);
-      setAuthorized(true);
-    }
-  }, []);
-
   async function submitPasscode() {
     setCheckingAuth(true);
     setAuthError(null);
@@ -132,8 +127,7 @@ export default function ReviewPage() {
         return;
       }
       window.sessionStorage.setItem('adminPasscode', enteredPasscode);
-      setPasscode(enteredPasscode);
-      setAuthorized(true);
+      setAuthorizedPasscodeOverride(enteredPasscode);
     } catch {
       setAuthError('Could not reach the server. Check your connection and try again.');
     } finally {
