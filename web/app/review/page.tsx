@@ -13,6 +13,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Lock } from 'lucide-react';
 import { useStoredValue } from '@/lib/useStoredValue';
+import { toast } from 'sonner';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001';
 const API_URL = WS_URL.replace(/^ws/, 'http');
@@ -32,6 +33,18 @@ type TranscriptLine = {
   removeState?: 'pending' | 'error';
   removeError?: string;
 };
+
+interface ViewerFeedbackItem {
+  id: string;
+  sessionId: string;
+  timestamp: string;
+  language: string;
+  lineIndex: number;
+  english: string;
+  translated: string;
+  comment: string;
+  downloaded: boolean;
+}
 
 function StatusBadge({ status }: { status: SessionStatus }) {
   if (status === 'recording') {
@@ -65,6 +78,9 @@ export default function ReviewPage() {
   const [hasUploadedDoc, setHasUploadedDoc] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [feedbackText, setFeedbackText] = useState('');
+  const [feedbackSaveStatus, setFeedbackSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [viewerFeedback, setViewerFeedback] = useState<ViewerFeedbackItem[]>([]);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -81,6 +97,7 @@ export default function ReviewPage() {
   }
 
   const pendingQueue = transcriptLines.filter((line) => line.pending && !line.dismissed);
+  const undownloadedFeedbackCount = viewerFeedback.filter((item) => !item.downloaded).length;
 
   const storedApproveKey = useStoredValue('captureApproveKey');
   const storedRejectKey = useStoredValue('captureRejectKey');
@@ -182,6 +199,19 @@ export default function ReviewPage() {
   }, [authorized]);
 
   useEffect(() => {
+    if (!authorized) return;
+    fetch(`${API_URL}/feedback`, { headers: { 'x-admin-passcode': passcode } })
+      .then((response) => response.json())
+      .then((data) => setFeedbackText(data.text ?? ''))
+      .catch(() => setFeedbackText(''));
+  }, [authorized, passcode]);
+
+  useEffect(() => {
+    if (!authorized) return;
+    void fetchViewerFeedback();
+  }, [authorized, passcode]);
+
+  useEffect(() => {
     const container = transcriptRef.current;
     if (container && isFollowing) container.scrollTop = container.scrollHeight;
   }, [transcriptLines, isFollowing]);
@@ -234,6 +264,74 @@ export default function ReviewPage() {
   function onFileSelected(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (file) void uploadSermonDoc(file);
+  }
+
+  async function fetchViewerFeedback() {
+    try {
+      const response = await fetch(`${API_URL}/viewer-feedback`, { headers: { 'x-admin-passcode': passcode } });
+      const data = await response.json();
+      setViewerFeedback(Array.isArray(data.items) ? data.items : []);
+    } catch {
+      setViewerFeedback([]);
+    }
+  }
+
+  async function saveFeedback() {
+    if (feedbackText.trim().length === 0) {
+      const confirmed = window.confirm('Clear all feedback notes?');
+      if (!confirmed) return;
+    }
+    setFeedbackSaveStatus('saving');
+    try {
+      const response = await fetch(`${API_URL}/feedback`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'x-admin-passcode': passcode },
+        body: JSON.stringify({ text: feedbackText }),
+      });
+      if (!response.ok) {
+        toast.error(`Save failed (status ${response.status}). Check your connection and try again.`);
+        setFeedbackSaveStatus('idle');
+        return;
+      }
+      setFeedbackSaveStatus('saved');
+      toast.success('Feedback notes saved.');
+    } catch {
+      toast.error('Save failed. Check your connection and try again.');
+      setFeedbackSaveStatus('idle');
+    }
+  }
+
+  async function downloadFeedbackCsv(url: string) {
+    try {
+      const response = await fetch(url, { method: 'POST', headers: { 'x-admin-passcode': passcode } });
+      if (!response.ok) {
+        toast.error(`Download failed (status ${response.status}). Check your connection and try again.`);
+        return;
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') ?? '';
+      const match = disposition.match(/filename="([^"]+)"/);
+      const filename = match ? match[1] : 'feedback.csv';
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(objectUrl);
+      await fetchViewerFeedback();
+    } catch {
+      toast.error('Download failed. Check your connection and try again.');
+    }
+  }
+
+  function downloadFeedbackItem(id: string) {
+    void downloadFeedbackCsv(`${API_URL}/viewer-feedback/${id}/download`);
+  }
+
+  function downloadAllUndownloadedFeedback() {
+    void downloadFeedbackCsv(`${API_URL}/viewer-feedback/download-all`);
   }
 
   function connectSocket() {
@@ -419,7 +517,14 @@ export default function ReviewPage() {
         <TabsList>
           <TabsTrigger value="live">Live</TabsTrigger>
           <TabsTrigger value="notes">Feedback notes</TabsTrigger>
-          <TabsTrigger value="viewer-feedback">Viewer feedback</TabsTrigger>
+          <TabsTrigger value="viewer-feedback">
+            Viewer feedback
+            {undownloadedFeedbackCount > 0 && (
+              <Badge variant="secondary" className="ml-1.5">
+                {undownloadedFeedbackCount}
+              </Badge>
+            )}
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="live" className="flex flex-col gap-4">
@@ -614,11 +719,59 @@ export default function ReviewPage() {
         </TabsContent>
 
         <TabsContent value="notes" className="flex max-w-2xl flex-col gap-2">
-          <p className="text-sm text-muted-foreground">Filled in by the next task.</p>
+          <label className="text-sm font-medium">Feedback notes (optional)</label>
+          <Textarea
+            value={feedbackText}
+            onChange={(event) => {
+              setFeedbackText(event.target.value);
+              setFeedbackSaveStatus('idle');
+            }}
+            rows={10}
+            placeholder="Notes about past translation accuracy issues, e.g. names that were missed…"
+          />
+          <div>
+            <Button variant="secondary" onClick={saveFeedback} disabled={feedbackSaveStatus === 'saving'}>
+              Save feedback notes
+            </Button>
+          </div>
         </TabsContent>
 
         <TabsContent value="viewer-feedback" className="flex max-w-2xl flex-col gap-2">
-          <p className="text-sm text-muted-foreground">Filled in by the next task.</p>
+          <div className="flex items-center justify-between gap-2">
+            <label className="text-sm font-medium">Viewer feedback</label>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={downloadAllUndownloadedFeedback}
+              disabled={undownloadedFeedbackCount === 0}
+            >
+              Download all undownloaded ({undownloadedFeedbackCount} new)
+            </Button>
+          </div>
+          {viewerFeedback.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No feedback yet.</p>
+          ) : (
+            <ScrollArea className="h-80 rounded-md border">
+              <div className="divide-y">
+                {viewerFeedback.map((item) => (
+                  <div key={item.id} className="p-2 flex flex-col gap-1 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-muted-foreground">
+                        {new Date(item.timestamp).toLocaleString()} · {item.language}
+                        {item.downloaded ? ' · downloaded' : ' · new'}
+                      </span>
+                      <Button variant="link" size="xs" onClick={() => downloadFeedbackItem(item.id)}>
+                        Download
+                      </Button>
+                    </div>
+                    <p className="text-muted-foreground">{item.english}</p>
+                    <p>{item.translated}</p>
+                    {item.comment && <p className="italic">&quot;{item.comment}&quot;</p>}
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          )}
         </TabsContent>
       </Tabs>
     </main>
