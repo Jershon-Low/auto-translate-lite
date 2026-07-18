@@ -1,6 +1,15 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Textarea } from '@/components/ui/textarea';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001';
 const API_URL = WS_URL.replace(/^ws/, 'http');
@@ -33,6 +42,24 @@ interface ViewerFeedbackItem {
   downloaded: boolean;
 }
 
+function StatusBadge({ status }: { status: CaptureStatus }) {
+  if (status === 'recording') {
+    return (
+      <Badge className="gap-1.5">
+        <span className="size-2 animate-pulse rounded-full bg-primary-foreground" />
+        Recording
+      </Badge>
+    );
+  }
+  if (status === 'reconnecting') {
+    return <Badge variant="secondary">Reconnecting…</Badge>;
+  }
+  if (status === 'error') {
+    return <Badge variant="destructive">Error</Badge>;
+  }
+  return <Badge variant="secondary">Idle</Badge>;
+}
+
 export default function CapturePage() {
   const [status, setStatus] = useState<CaptureStatus>('idle');
   const [transcriptLines, setTranscriptLines] = useState<TranscriptLine[]>([]);
@@ -44,9 +71,7 @@ export default function CapturePage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [feedbackText, setFeedbackText] = useState('');
   const [feedbackSaveStatus, setFeedbackSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
-  const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const [viewerFeedback, setViewerFeedback] = useState<ViewerFeedbackItem[]>([]);
-  const [feedbackDownloadError, setFeedbackDownloadError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -71,6 +96,7 @@ export default function CapturePage() {
   }
 
   const pendingQueue = transcriptLines.filter((line) => line.pending && !line.dismissed);
+  const undownloadedFeedbackCount = viewerFeedback.filter((item) => !item.downloaded).length;
 
   const [approveKey, setApproveKey] = useState('Enter');
   const [rejectKey, setRejectKey] = useState(' ');
@@ -213,7 +239,6 @@ export default function CapturePage() {
       if (!confirmed) return;
     }
     setFeedbackSaveStatus('saving');
-    setFeedbackError(null);
     try {
       const response = await fetch(`${API_URL}/feedback`, {
         method: 'PUT',
@@ -221,23 +246,23 @@ export default function CapturePage() {
         body: JSON.stringify({ text: feedbackText }),
       });
       if (!response.ok) {
-        setFeedbackError(`Save failed (status ${response.status}). Check your connection and try again.`);
+        toast.error(`Save failed (status ${response.status}). Check your connection and try again.`);
         setFeedbackSaveStatus('idle');
         return;
       }
       setFeedbackSaveStatus('saved');
+      toast.success('Feedback notes saved.');
     } catch {
-      setFeedbackError('Save failed. Check your connection and try again.');
+      toast.error('Save failed. Check your connection and try again.');
       setFeedbackSaveStatus('idle');
     }
   }
 
   async function downloadFeedbackCsv(url: string) {
-    setFeedbackDownloadError(null);
     try {
       const response = await fetch(url, { method: 'POST' });
       if (!response.ok) {
-        setFeedbackDownloadError(`Download failed (status ${response.status}). Check your connection and try again.`);
+        toast.error(`Download failed (status ${response.status}). Check your connection and try again.`);
         return;
       }
       const blob = await response.blob();
@@ -254,7 +279,7 @@ export default function CapturePage() {
       URL.revokeObjectURL(objectUrl);
       await fetchViewerFeedback();
     } catch {
-      setFeedbackDownloadError('Download failed. Check your connection and try again.');
+      toast.error('Download failed. Check your connection and try again.');
     }
   }
 
@@ -424,277 +449,314 @@ export default function CapturePage() {
   }
 
   return (
-    <main className="min-h-screen flex flex-col items-center gap-6 p-6">
-      <h1 className="text-xl font-semibold">Sermon Capture</h1>
-
-      <div className="w-full max-w-xl flex flex-col gap-2">
-        <label className="text-sm font-medium">Sermon document (optional, PDF or Word)</label>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".pdf,.docx"
-          onChange={onFileSelected}
-          disabled={status === 'recording' || status === 'reconnecting' || isUploading}
-        />
-        {isUploading && <p className="text-sm text-muted-foreground">Uploading…</p>}
-        {hasUploadedDoc && !isUploading && <p className="text-sm text-green-600">Document loaded.</p>}
-        {uploadError && <p className="text-sm text-destructive">{uploadError}</p>}
+    <main className="flex min-h-screen flex-col">
+      <div className="sticky top-0 z-10 flex flex-col gap-3 border-b bg-background p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <h1 className="text-lg font-semibold">Sermon Capture</h1>
+            <StatusBadge status={status} />
+          </div>
+          <div className="flex items-center gap-2">
+            <Button onClick={start} disabled={status === 'recording' || status === 'reconnecting'}>
+              Start
+            </Button>
+            <Button variant="secondary" onClick={stop} disabled={status === 'idle'}>
+              Stop
+            </Button>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
+          <span>
+            Session: ${sessionCostUsd.toFixed(4)} · Lifetime: ${lifetimeCostUsd.toFixed(2)}
+          </span>
+          <div className="flex items-center gap-2">
+            <label htmlFor="sermon-doc" className="font-medium text-foreground">
+              Sermon document
+            </label>
+            <input
+              id="sermon-doc"
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.docx"
+              onChange={onFileSelected}
+              disabled={status === 'recording' || status === 'reconnecting' || isUploading}
+              className="text-xs"
+            />
+            {isUploading && <span>Uploading…</span>}
+            {hasUploadedDoc && !isUploading && <span className="text-green-500">Loaded.</span>}
+            {uploadError && <span className="text-destructive">{uploadError}</span>}
+          </div>
+        </div>
+        {errorMessage && (
+          <Alert variant="destructive">
+            <AlertDescription>{errorMessage}</AlertDescription>
+          </Alert>
+        )}
       </div>
 
-      <div className="flex gap-4">
-        <button
-          onClick={start}
-          disabled={status === 'recording' || status === 'reconnecting'}
-          className="bg-primary text-primary-foreground px-4 py-2 rounded disabled:opacity-50"
-        >
-          Start
-        </button>
-        <button
-          onClick={stop}
-          disabled={status === 'idle'}
-          className="bg-secondary text-secondary-foreground px-4 py-2 rounded disabled:opacity-50"
-        >
-          Stop
-        </button>
-      </div>
-      <div className="flex items-center gap-3 text-sm">
-        <span className="font-medium">Mode:</span>
-        <button
-          onClick={() => setMode('automatic')}
-          className={mode === 'automatic' ? 'underline font-semibold' : 'text-muted-foreground'}
-        >
-          Automatic
-        </button>
-        <button
-          onClick={() => setMode('manual')}
-          className={mode === 'manual' ? 'underline font-semibold' : 'text-muted-foreground'}
-        >
-          Manual
-        </button>
-        {mode === 'manual' && <span className="text-muted-foreground">{pendingQueue.length} pending</span>}
-      </div>
-      <div className="flex items-center gap-3 text-sm">
-        <span className="font-medium">Shortcuts:</span>
-        <button
-          onClick={() => {
-            setRebindError(null);
-            setRebindingAction('approve');
-          }}
-          className="underline"
-        >
-          Approve: {rebindingAction === 'approve' ? 'press a key…' : displayKey(approveKey)}
-        </button>
-        <button
-          onClick={() => {
-            setRebindError(null);
-            setRebindingAction('reject');
-          }}
-          className="underline"
-        >
-          Reject: {rebindingAction === 'reject' ? 'press a key…' : displayKey(rejectKey)}
-        </button>
-        {rebindError && <span className="text-destructive text-xs">{rebindError}</span>}
-      </div>
-      <p className="text-sm text-muted-foreground">Status: {status}</p>
-      <p className="text-sm text-muted-foreground">
-        Session: ${sessionCostUsd.toFixed(4)} · Lifetime: ${lifetimeCostUsd.toFixed(2)}
-      </p>
-      {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
-      {mode === 'manual' && (
-        <div className="w-full max-w-xl flex flex-col gap-2">
-          <label className="text-sm font-medium">Pending approval ({pendingQueue.length})</label>
-          {pendingQueue.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Nothing waiting.</p>
-          ) : (
-            <div className="border rounded divide-y max-h-64 overflow-y-auto text-sm">
-              {pendingQueue.map((line, index) => (
-                <div key={line.id} className={`p-2 flex flex-col gap-1 ${index === 0 ? 'bg-accent/30' : ''}`}>
-                  <p>{line.text}</p>
-                  {line.reason && <p className="text-xs text-muted-foreground">{line.reason}</p>}
-                  {line.reinstateState === 'editing' && status === 'recording' ? (
-                    <div className="flex flex-col gap-1">
-                      <textarea
+      <Tabs defaultValue="live" className="flex-1 p-4">
+        <TabsList>
+          <TabsTrigger value="live">Live</TabsTrigger>
+          <TabsTrigger value="notes">Feedback notes</TabsTrigger>
+          <TabsTrigger value="viewer-feedback">
+            Viewer feedback
+            {undownloadedFeedbackCount > 0 && (
+              <Badge variant="secondary" className="ml-1.5">
+                {undownloadedFeedbackCount}
+              </Badge>
+            )}
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="live" className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <ToggleGroup
+              value={[mode]}
+              onValueChange={(values) => {
+                const newMode = values[0];
+                if (newMode) setMode(newMode as 'automatic' | 'manual');
+              }}
+            >
+              <ToggleGroupItem value="automatic">Automatic</ToggleGroupItem>
+              <ToggleGroupItem value="manual">Manual</ToggleGroupItem>
+            </ToggleGroup>
+            {mode === 'manual' && (
+              <span className="text-sm text-muted-foreground">{pendingQueue.length} pending</span>
+            )}
+            {mode === 'manual' && (
+              <Popover>
+                <PopoverTrigger render={<Button variant="ghost" size="sm">Shortcuts</Button>} />
+                <PopoverContent className="w-72">
+                  <div className="flex flex-col gap-2 text-sm">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setRebindError(null);
+                        setRebindingAction('approve');
+                      }}
+                    >
+                      Approve: {rebindingAction === 'approve' ? 'press a key…' : displayKey(approveKey)}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setRebindError(null);
+                        setRebindingAction('reject');
+                      }}
+                    >
+                      Reject: {rebindingAction === 'reject' ? 'press a key…' : displayKey(rejectKey)}
+                    </Button>
+                    {rebindError && <p className="text-xs text-destructive">{rebindError}</p>}
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )}
+          </div>
+
+          {mode === 'manual' && (
+            <div className="flex flex-col gap-2">
+              <p className="text-sm font-medium">Pending approval ({pendingQueue.length})</p>
+              {pendingQueue.length === 0 ? (
+                <p className="text-sm text-muted-foreground">Nothing waiting.</p>
+              ) : (
+                <ScrollArea className="h-64 rounded-md border">
+                  <div className="divide-y">
+                    {pendingQueue.map((line, index) => (
+                      <div key={line.id} className={`p-2 flex flex-col gap-1 ${index === 0 ? 'bg-accent/30' : ''}`}>
+                        <p className="text-sm">{line.text}</p>
+                        {line.reason && <p className="text-xs text-muted-foreground">{line.reason}</p>}
+                        {line.reinstateState === 'editing' && status === 'recording' ? (
+                          <div className="flex flex-col gap-1">
+                            <Textarea
+                              value={line.editedText ?? line.text}
+                              onChange={(event) => updateEditedText(line.id, event.target.value)}
+                              rows={2}
+                              className="text-xs"
+                            />
+                            <div className="flex items-center gap-2">
+                              <Button
+                                size="xs"
+                                onClick={() => sendReinstate(line.id)}
+                                disabled={(line.editedText ?? line.text).trim().length === 0}
+                              >
+                                Send
+                              </Button>
+                              <Button size="xs" variant="ghost" onClick={() => cancelEditing(line.id)}>
+                                Cancel
+                              </Button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <Button
+                              size="xs"
+                              onClick={() => sendReinstate(line.id)}
+                              disabled={status !== 'recording' || line.reinstateState === 'pending'}
+                            >
+                              {index === 0 ? `Approve (${displayKey(approveKey)})` : 'Approve'}
+                            </Button>
+                            <Button
+                              size="xs"
+                              variant="ghost"
+                              onClick={() => beginEditing(line.id, line.text)}
+                              disabled={status !== 'recording' || line.reinstateState === 'pending'}
+                            >
+                              Edit
+                            </Button>
+                            <Button size="xs" variant="destructive" onClick={() => rejectLine(line.id)}>
+                              {index === 0 ? `Reject (${displayKey(rejectKey)})` : 'Reject'}
+                            </Button>
+                          </div>
+                        )}
+                        {line.reinstateState === 'error' && (
+                          <p className="text-xs text-destructive">
+                            Couldn&apos;t approve ({line.reinstateError}) — try again.
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              )}
+            </div>
+          )}
+
+          <div className="relative">
+            {!isFollowing && (
+              <Button onClick={jumpToLatest} size="sm" className="absolute bottom-2 right-2 z-10 shadow">
+                Jump to latest
+              </Button>
+            )}
+            {/* Kept as a plain scrollable div (not ScrollArea): isFollowing/jumpToLatest need
+               a direct ref to the element's scrollTop/scrollHeight/clientHeight. */}
+            <div
+              ref={transcriptRef}
+              onScroll={onTranscriptScroll}
+              className="h-64 w-full overflow-y-auto rounded-md border p-3 text-sm space-y-2"
+            >
+              {transcriptLines.map((line) => (
+                <div key={line.id} className="group">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className={line.flagged ? 'text-destructive line-through' : undefined}>{line.text}</p>
+                    {!line.flagged && (
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => sendAdminRemove(line.id)}
+                        disabled={status !== 'recording' || line.removeState === 'pending'}
+                        className="text-destructive opacity-0 group-hover:opacity-100"
+                      >
+                        {line.removeState === 'pending' ? 'Removing…' : 'Remove'}
+                      </Button>
+                    )}
+                  </div>
+                  {line.flagged && line.reinstateState !== 'editing' && (
+                    <div className="flex items-center gap-2 text-xs">
+                      {line.reason && <span className="text-muted-foreground">Flagged: {line.reason}</span>}
+                      <Button
+                        variant="link"
+                        size="xs"
+                        onClick={() => beginEditing(line.id, line.text)}
+                        disabled={status !== 'recording' || line.reinstateState === 'pending'}
+                      >
+                        {line.reinstateState === 'pending' ? 'Reinstating…' : 'Reinstate'}
+                      </Button>
+                    </div>
+                  )}
+                  {line.flagged && line.reinstateState === 'editing' && status === 'recording' && (
+                    <div className="mt-1 flex flex-col gap-1">
+                      <Textarea
                         value={line.editedText ?? line.text}
                         onChange={(event) => updateEditedText(line.id, event.target.value)}
                         rows={2}
-                        className="w-full border rounded p-1 text-xs"
+                        className="text-xs"
                       />
                       <div className="flex items-center gap-2">
-                        <button
+                        <Button
+                          size="xs"
                           onClick={() => sendReinstate(line.id)}
                           disabled={(line.editedText ?? line.text).trim().length === 0}
-                          className="bg-primary text-primary-foreground px-2 py-1 rounded text-xs disabled:opacity-50"
                         >
                           Send
-                        </button>
-                        <button onClick={() => cancelEditing(line.id)} className="text-xs underline">
+                        </Button>
+                        <Button size="xs" variant="ghost" onClick={() => cancelEditing(line.id)}>
                           Cancel
-                        </button>
+                        </Button>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => sendReinstate(line.id)}
-                        disabled={status !== 'recording' || line.reinstateState === 'pending'}
-                        className="bg-primary text-primary-foreground px-2 py-1 rounded text-xs disabled:opacity-50"
-                      >
-                        {index === 0 ? `Approve (${displayKey(approveKey)})` : 'Approve'}
-                      </button>
-                      <button
-                        onClick={() => beginEditing(line.id, line.text)}
-                        disabled={status !== 'recording' || line.reinstateState === 'pending'}
-                        className="underline text-xs disabled:opacity-50"
-                      >
-                        Edit
-                      </button>
-                      <button onClick={() => rejectLine(line.id)} className="underline text-xs text-destructive">
-                        {index === 0 ? `Reject (${displayKey(rejectKey)})` : 'Reject'}
-                      </button>
                     </div>
                   )}
                   {line.reinstateState === 'error' && (
-                    <p className="text-xs text-destructive">Couldn&apos;t approve ({line.reinstateError}) — try again.</p>
+                    <p className="text-xs text-destructive">
+                      Couldn&apos;t reinstate ({line.reinstateError}) — try again.
+                    </p>
+                  )}
+                  {line.removeState === 'error' && (
+                    <p className="text-xs text-destructive">Couldn&apos;t remove ({line.removeError}) — try again.</p>
                   )}
                 </div>
               ))}
             </div>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="notes" className="flex max-w-2xl flex-col gap-2">
+          <label className="text-sm font-medium">Feedback notes (optional)</label>
+          <Textarea
+            value={feedbackText}
+            onChange={(event) => {
+              setFeedbackText(event.target.value);
+              setFeedbackSaveStatus('idle');
+            }}
+            rows={10}
+            placeholder="Notes about past translation accuracy issues, e.g. names that were missed…"
+          />
+          <div>
+            <Button variant="secondary" onClick={saveFeedback} disabled={feedbackSaveStatus === 'saving'}>
+              Save feedback notes
+            </Button>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="viewer-feedback" className="flex max-w-2xl flex-col gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <label className="text-sm font-medium">Viewer feedback</label>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={downloadAllUndownloadedFeedback}
+              disabled={undownloadedFeedbackCount === 0}
+            >
+              Download all undownloaded ({undownloadedFeedbackCount} new)
+            </Button>
+          </div>
+          {viewerFeedback.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No feedback yet.</p>
+          ) : (
+            <ScrollArea className="h-80 rounded-md border">
+              <div className="divide-y">
+                {viewerFeedback.map((item) => (
+                  <div key={item.id} className="p-2 flex flex-col gap-1 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-muted-foreground">
+                        {new Date(item.timestamp).toLocaleString()} · {item.language}
+                        {item.downloaded ? ' · downloaded' : ' · new'}
+                      </span>
+                      <Button variant="link" size="xs" onClick={() => downloadFeedbackItem(item.id)}>
+                        Download
+                      </Button>
+                    </div>
+                    <p className="text-muted-foreground">{item.english}</p>
+                    <p>{item.translated}</p>
+                    {item.comment && <p className="italic">&quot;{item.comment}&quot;</p>}
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
           )}
-        </div>
-      )}
-      <div className="relative w-full max-w-xl">
-        {!isFollowing && (
-          <button
-            onClick={jumpToLatest}
-            className="absolute bottom-2 right-2 z-10 bg-primary text-primary-foreground px-3 py-1 rounded text-xs shadow"
-          >
-            Jump to latest
-          </button>
-        )}
-        <div
-          ref={transcriptRef}
-          onScroll={onTranscriptScroll}
-          className="w-full h-64 overflow-y-auto border rounded p-3 text-sm space-y-2"
-        >
-        {transcriptLines.map((line) => (
-          <div key={line.id} className="group">
-            <div className="flex items-start justify-between gap-2">
-              <p className={line.flagged ? 'text-destructive line-through' : undefined}>{line.text}</p>
-              {!line.flagged && (
-                <button
-                  onClick={() => sendAdminRemove(line.id)}
-                  disabled={status !== 'recording' || line.removeState === 'pending'}
-                  className="opacity-0 group-hover:opacity-100 text-xs underline text-destructive shrink-0 disabled:opacity-50"
-                >
-                  {line.removeState === 'pending' ? 'Removing…' : 'Remove'}
-                </button>
-              )}
-            </div>
-            {line.flagged && line.reinstateState !== 'editing' && (
-              <div className="flex items-center gap-2 text-xs">
-                {line.reason && <span className="text-muted-foreground">Flagged: {line.reason}</span>}
-                <button
-                  onClick={() => beginEditing(line.id, line.text)}
-                  disabled={status !== 'recording' || line.reinstateState === 'pending'}
-                  className="underline disabled:opacity-50 disabled:no-underline"
-                >
-                  {line.reinstateState === 'pending' ? 'Reinstating…' : 'Reinstate'}
-                </button>
-              </div>
-            )}
-            {line.flagged && line.reinstateState === 'editing' && status === 'recording' && (
-              <div className="flex flex-col gap-1 mt-1">
-                <textarea
-                  value={line.editedText ?? line.text}
-                  onChange={(event) => updateEditedText(line.id, event.target.value)}
-                  rows={2}
-                  className="w-full border rounded p-1 text-xs"
-                />
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => sendReinstate(line.id)}
-                    disabled={(line.editedText ?? line.text).trim().length === 0}
-                    className="bg-primary text-primary-foreground px-2 py-1 rounded text-xs disabled:opacity-50"
-                  >
-                    Send
-                  </button>
-                  <button onClick={() => cancelEditing(line.id)} className="text-xs underline">
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-            {line.reinstateState === 'error' && (
-              <p className="text-xs text-destructive">Couldn&apos;t reinstate ({line.reinstateError}) — try again.</p>
-            )}
-            {line.removeState === 'error' && (
-              <p className="text-xs text-destructive">Couldn&apos;t remove ({line.removeError}) — try again.</p>
-            )}
-          </div>
-        ))}
-        </div>
-      </div>
-
-      <div className="w-full max-w-xl flex flex-col gap-2">
-        <label className="text-sm font-medium">Feedback notes (optional)</label>
-        <textarea
-          value={feedbackText}
-          onChange={(event) => {
-            setFeedbackText(event.target.value);
-            setFeedbackSaveStatus('idle');
-          }}
-          rows={6}
-          className="w-full border rounded p-2 text-sm"
-          placeholder="Notes about past translation accuracy issues, e.g. names that were missed…"
-        />
-        <div className="flex items-center gap-3">
-          <button
-            onClick={saveFeedback}
-            disabled={feedbackSaveStatus === 'saving'}
-            className="bg-secondary text-secondary-foreground px-4 py-2 rounded disabled:opacity-50"
-          >
-            Save feedback notes
-          </button>
-          {feedbackSaveStatus === 'saved' && <p className="text-sm text-green-600">Saved.</p>}
-        </div>
-        {feedbackError && <p className="text-sm text-destructive">{feedbackError}</p>}
-      </div>
-
-      <div className="w-full max-w-xl flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-2">
-          <label className="text-sm font-medium">Viewer feedback</label>
-          <button
-            onClick={downloadAllUndownloadedFeedback}
-            disabled={viewerFeedback.every((item) => item.downloaded)}
-            className="bg-secondary text-secondary-foreground px-3 py-1 rounded text-sm disabled:opacity-50"
-          >
-            Download all undownloaded ({viewerFeedback.filter((item) => !item.downloaded).length} new)
-          </button>
-        </div>
-        {feedbackDownloadError && <p className="text-sm text-destructive">{feedbackDownloadError}</p>}
-        {viewerFeedback.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No feedback yet.</p>
-        ) : (
-          <div className="border rounded divide-y max-h-80 overflow-y-auto text-sm">
-            {viewerFeedback.map((item) => (
-              <div key={item.id} className="p-2 flex flex-col gap-1">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs text-muted-foreground">
-                    {new Date(item.timestamp).toLocaleString()} · {item.language}
-                    {item.downloaded ? ' · downloaded' : ' · new'}
-                  </span>
-                  <button onClick={() => downloadFeedbackItem(item.id)} className="text-xs underline">
-                    Download
-                  </button>
-                </div>
-                <p className="text-muted-foreground">{item.english}</p>
-                <p>{item.translated}</p>
-                {item.comment && <p className="italic">&quot;{item.comment}&quot;</p>}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+        </TabsContent>
+      </Tabs>
     </main>
   );
 }
