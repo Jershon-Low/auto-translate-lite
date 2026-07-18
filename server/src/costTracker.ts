@@ -12,6 +12,7 @@ export interface GeminiUsage {
 
 export interface CostTracker {
   recordGeminiUsage(usage: GeminiUsage): void;
+  recordOpenRouterUsage(usage: { model: string; costUsd: number }): void;
   recordDeepgramSeconds(seconds: number): void;
   resetSession(): void;
   getSessionCostUsd(): number;
@@ -77,6 +78,9 @@ export function createCostTracker(filePath: string): CostTracker {
         (usage.cachedTokens / 1_000_000) * pricing.cachedInput +
         (usage.candidatesTokens / 1_000_000) * pricing.output;
       addCost(cost);
+    },
+    recordOpenRouterUsage(usage: { model: string; costUsd: number }): void {
+      addCost(usage.costUsd);
     },
     recordDeepgramSeconds(seconds: number): void {
       const rate = DEEPGRAM_PRICING_USD_PER_MINUTE['nova-3'];

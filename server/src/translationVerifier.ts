@@ -1,5 +1,9 @@
 import { thinkingConfigFor, type GeminiClient, type SermonCacheRef } from './gemini.js';
-import { TRANSLATION_VERIFIER_FIXED_RULES_INTRO, TRANSLATION_VERIFIER_FIXED_RULES_OUTRO } from './llmPrompts.js';
+import {
+  TRANSLATION_VERIFIER_FIXED_RULES_INTRO,
+  TRANSLATION_VERIFIER_FIXED_RULES_OUTRO,
+  buildTranslationVerifierTaskText,
+} from './llmPrompts.js';
 
 export interface VerificationItem {
   id: string;
@@ -30,13 +34,6 @@ export async function verifyTranslations(
     };
   }
 
-  const pairs = items
-    .map(
-      (item, index) =>
-        `${index + 1}. [id: "${item.id}"] English: "${item.english}" | Translation: "${item.translated}"`
-    )
-    .join('\n');
-
   const instructionBlock = cacheRef
     ? ''
     : `${TRANSLATION_VERIFIER_FIXED_RULES_INTRO}\n\n${notes}\n\n${TRANSLATION_VERIFIER_FIXED_RULES_OUTRO}\n\n`;
@@ -50,10 +47,7 @@ export async function verifyTranslations(
 
   const response = await client.models.generateContent({
     model,
-    contents: `${cacheRouterMarker}${instructionBlock}Pairs:
-${pairs}
-
-Return, for each id, whether it is safe and a short reason.`,
+    contents: `${cacheRouterMarker}${instructionBlock}${buildTranslationVerifierTaskText(items)}`,
     config: {
       responseMimeType: 'application/json',
       responseSchema: { type: 'object', properties, required: items.map((item) => item.id) },

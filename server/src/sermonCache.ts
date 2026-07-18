@@ -1,6 +1,7 @@
 import type { GeminiClient, SermonCacheRef } from './gemini.js';
 import type { ModelConfig } from './modelConfigStore.js';
 import type { PromptConfig } from './promptConfigStore.js';
+import type { RoleModelSelection } from './llmTypes.js';
 import {
   TRANSLATION_FIXED_RULES,
   TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO,
@@ -42,17 +43,19 @@ function buildSharedContextBlock(feedbackText: string, sermonText: string): stri
 
 async function createOneRoleCache(
   client: GeminiClient,
-  model: string,
+  selection: RoleModelSelection,
   fixedAndNotes: string,
   sharedContext: string,
   displayName: string
 ): Promise<SermonCacheRef | null> {
+  if (selection.provider !== 'gemini') return null;
+
   const instruction = sharedContext.length > 0 ? `${fixedAndNotes}\n\n${sharedContext}` : fixedAndNotes;
   if (instruction.length < MIN_CACHEABLE_CHARS) return null;
 
   try {
     const cache = await client.caches.create({
-      model,
+      model: selection.model,
       config: { systemInstruction: instruction, ttl: CACHE_TTL, displayName },
     });
     return cache.name ? { name: cache.name } : null;

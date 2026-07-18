@@ -13,6 +13,7 @@ import {
   createTranslationFlagDisplayStore,
   DEFAULT_TRANSLATION_FLAG_DISPLAY_CONFIG,
 } from '../src/translationFlagDisplayStore';
+import { createOpenRouterModelsStore } from '../src/openRouterModelsStore';
 
 vi.mock('../src/docExtraction', () => ({
   extractDocumentText: vi.fn().mockResolvedValue('Extracted sermon text'),
@@ -32,6 +33,9 @@ function testDeps() {
     promptConfigStore: createPromptConfigStore(join(tmpdir(), `prompt-config-app-test-${Date.now()}-${Math.random()}.json`)),
     translationFlagDisplayStore: createTranslationFlagDisplayStore(
       join(tmpdir(), `translation-flag-display-app-test-${Date.now()}-${Math.random()}.json`)
+    ),
+    openRouterModelsStore: createOpenRouterModelsStore(
+      join(tmpdir(), `openrouter-models-app-test-${Date.now()}-${Math.random()}.json`)
     ),
     adminPasscode: 'test-passcode',
   };
@@ -254,9 +258,9 @@ describe('GET/PUT /admin/model-config', () => {
     const deps = testDeps();
     const app = createApp(deps);
     const newConfig = {
-      transcriptionVerifier: 'gemini-3.1-flash-lite',
-      translation: 'gemini-3.5-flash',
-      translationVerifier: 'gemini-3.1-flash-lite',
+      transcriptionVerifier: { provider: 'gemini', model: 'gemini-3.1-flash-lite' },
+      translation: { provider: 'openrouter', model: 'qwen/qwen3.6-flash' },
+      translationVerifier: { provider: 'gemini', model: 'gemini-3.1-flash-lite' },
     };
 
     const putResponse = await request(app)
@@ -369,5 +373,43 @@ describe('GET/PUT /admin/translation-flag-display', () => {
       .get('/admin/translation-flag-display')
       .set('x-admin-passcode', 'test-passcode');
     expect(getResponse.body).toEqual(DEFAULT_TRANSLATION_FLAG_DISPLAY_CONFIG);
+  });
+});
+
+describe('GET/POST /admin/openrouter-models', () => {
+  it('returns 401 without the admin passcode header', async () => {
+    const response = await request(createApp(testDeps())).get('/admin/openrouter-models');
+    expect(response.status).toBe(401);
+  });
+
+  it('returns an empty list on first read', async () => {
+    const response = await request(createApp(testDeps()))
+      .get('/admin/openrouter-models')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ models: [] });
+  });
+
+  it('adds a model id and returns it on a subsequent read', async () => {
+    const deps = testDeps();
+    const app = createApp(deps);
+
+    const postResponse = await request(app)
+      .post('/admin/openrouter-models')
+      .set('x-admin-passcode', 'test-passcode')
+      .send({ model: 'qwen/qwen3.6-flash' });
+    expect(postResponse.status).toBe(200);
+    expect(postResponse.body).toEqual({ models: ['qwen/qwen3.6-flash'] });
+
+    const getResponse = await request(app).get('/admin/openrouter-models').set('x-admin-passcode', 'test-passcode');
+    expect(getResponse.body).toEqual({ models: ['qwen/qwen3.6-flash'] });
+  });
+
+  it('rejects an empty model id with 400', async () => {
+    const response = await request(createApp(testDeps()))
+      .post('/admin/openrouter-models')
+      .set('x-admin-passcode', 'test-passcode')
+      .send({ model: '' });
+    expect(response.status).toBe(400);
   });
 });

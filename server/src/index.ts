@@ -12,9 +12,13 @@ import { createCostTracker } from './costTracker.js';
 import { createModelConfigStore } from './modelConfigStore.js';
 import { createPromptConfigStore } from './promptConfigStore.js';
 import { createTranslationFlagDisplayStore } from './translationFlagDisplayStore.js';
+import { createOpenRouterModelsStore } from './openRouterModelsStore.js';
 import { withCostTracking } from './geminiCostTracking.js';
 import { withGeminiLimiter } from './geminiRateLimiting.js';
 import { GeminiCallLimiter } from './geminiLimiter.js';
+import { createOpenRouterClient } from './openRouterClient.js';
+import { withOpenRouterCostTracking } from './openRouterCostTracking.js';
+import { withOpenRouterLimiter } from './openRouterLimiter.js';
 
 const requiredEnvVars = ['DEEPGRAM_API_KEY', 'GEMINI_API_KEY'] as const;
 for (const key of requiredEnvVars) {
@@ -30,6 +34,13 @@ const geminiClient = withCostTracking(
   withGeminiLimiter(createGeminiClient(process.env.GEMINI_API_KEY!), geminiLimiter),
   costTracker
 );
+const openRouterLimiter = new GeminiCallLimiter();
+const openRouterClient = process.env.OPENROUTER_API_KEY
+  ? withOpenRouterCostTracking(
+      withOpenRouterLimiter(createOpenRouterClient(process.env.OPENROUTER_API_KEY), openRouterLimiter),
+      costTracker
+    )
+  : null;
 const sermonDocStore = createSermonDocStore();
 const feedbackStore = createFeedbackStore(process.env.FEEDBACK_FILE_PATH ?? 'data/feedback.txt');
 const viewerFeedbackStore = createViewerFeedbackStore(
@@ -37,6 +48,9 @@ const viewerFeedbackStore = createViewerFeedbackStore(
 );
 const modelConfigStore = createModelConfigStore(process.env.MODEL_CONFIG_FILE_PATH ?? 'data/model-config.json');
 const promptConfigStore = createPromptConfigStore(process.env.PROMPT_CONFIG_FILE_PATH ?? 'data/prompt-config.json');
+const openRouterModelsStore = createOpenRouterModelsStore(
+  process.env.OPENROUTER_MODELS_FILE_PATH ?? 'data/openrouter-models.json'
+);
 const translationFlagDisplayStore = createTranslationFlagDisplayStore(
   process.env.TRANSLATION_FLAG_DISPLAY_FILE_PATH ?? 'data/translation-flag-display.json'
 );
@@ -48,6 +62,7 @@ const app = createApp({
   session,
   modelConfigStore,
   promptConfigStore,
+  openRouterModelsStore,
   translationFlagDisplayStore,
   adminPasscode: process.env.ADMIN_PASSCODE,
 });
@@ -57,6 +72,7 @@ attachWsServer({
   httpServer,
   session,
   geminiClient,
+  llmClients: { gemini: geminiClient, openRouter: openRouterClient },
   deepgramApiKey: process.env.DEEPGRAM_API_KEY!,
   createDeepgramConnection,
   sermonDocStore,
