@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { Languages } from 'lucide-react';
 import { TARGET_LANGUAGES } from '@/lib/languages';
 import { Card, CardContent } from '@/components/ui/card';
 
@@ -34,16 +35,22 @@ function LandingPageContent() {
   if (!ready) return null;
 
   return (
-    <main className="min-h-screen flex flex-col items-center justify-center gap-6 p-6">
-      <h1 className="text-2xl font-semibold text-center">Choose your language</h1>
+    <main className="min-h-screen flex flex-col items-center justify-center gap-8 p-6">
+      <div className="flex flex-col items-center gap-2 text-center">
+        <h1 className="text-3xl font-semibold tracking-tight">Choose your language</h1>
+        <p className="text-muted-foreground">Live captions for today&apos;s service</p>
+      </div>
       <div className="grid grid-cols-2 gap-4 w-full max-w-md">
         {TARGET_LANGUAGES.map((language) => (
           <Card
             key={language.code}
-            className="cursor-pointer hover:bg-accent transition-colors"
+            className="cursor-pointer outline-none transition-colors hover:ring-2 hover:ring-primary focus-visible:ring-2 focus-visible:ring-primary"
             onClick={() => selectLanguage(language.code)}
           >
-            <CardContent className="p-4 text-center text-lg">{language.label}</CardContent>
+            <CardContent className="flex min-h-24 flex-col items-center justify-center gap-2 p-4 text-center">
+              <Languages className="size-5 text-muted-foreground" aria-hidden="true" />
+              <span className="text-lg font-medium">{language.label}</span>
+            </CardContent>
           </Card>
         ))}
       </div>
