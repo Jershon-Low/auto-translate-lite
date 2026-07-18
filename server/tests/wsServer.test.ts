@@ -131,6 +131,7 @@ describe('wsServer', () => {
   let feedbackStore: FeedbackStore;
   let costTracker: ReturnType<typeof fakeCostTracker>;
   let translationFlagDisplayStore: TranslationFlagDisplayStore;
+  let deps: Parameters<typeof attachWsServer>[0];
 
   beforeEach(async () => {
     session = new Session();
@@ -143,7 +144,7 @@ describe('wsServer', () => {
     costTracker = fakeCostTracker();
     translationFlagDisplayStore = fakeTranslationFlagDisplayStore();
 
-    attachWsServer({
+    deps = {
       httpServer,
       session,
       geminiClient,
@@ -160,7 +161,9 @@ describe('wsServer', () => {
       promptConfigStore: fakePromptConfigStore(),
       translationFlagDisplayStore,
       adminPasscode: 'test-passcode',
-    });
+      deepgramCostFlushIntervalMs: 5000,
+    };
+    attachWsServer(deps);
 
     await new Promise<void>((resolve) => httpServer.listen(0, resolve));
     port = (httpServer.address() as { port: number }).port;
@@ -2254,6 +2257,45 @@ describe('wsServer', () => {
       const cost = await costPromise;
 
       expect(cost).toEqual({ type: 'cost', sessionUsd: 0.0032, lifetimeUsd: 14.82 });
+
+      captureSocket.close();
+    });
+
+    it('periodically flushes elapsed Deepgram time to the cost tracker during an active recording, without waiting for stop', async () => {
+      deps.deepgramCostFlushIntervalMs = 20;
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const costPromise = waitForMessage(captureSocket); // first periodic flush's cost update — no 'stop' sent
+      const cost = await costPromise;
+
+      expect(cost.type).toBe('cost');
+      expect(costTracker.recordDeepgramSeconds).toHaveBeenCalledTimes(1);
+      const elapsedSeconds = (costTracker.recordDeepgramSeconds as any).mock.calls[0][0];
+      expect(elapsedSeconds).toBeGreaterThan(0);
+      expect(elapsedSeconds).toBeLessThan(1);
+
+      captureSocket.close();
+    });
+
+    it('stops the periodic Deepgram flush on stop, so no further flush fires after the final one', async () => {
+      deps.deepgramCostFlushIntervalMs = 20;
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      captureSocket.send(JSON.stringify({ type: 'stop' }));
+      await new Promise((resolve) => setTimeout(resolve, 50)); // status: idle, then final cost update
+
+      const callCountAtStop = (costTracker.recordDeepgramSeconds as any).mock.calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 60)); // long enough for 3 more flush ticks if the interval leaked
+
+      expect((costTracker.recordDeepgramSeconds as any).mock.calls.length).toBe(callCountAtStop);
 
       captureSocket.close();
     });

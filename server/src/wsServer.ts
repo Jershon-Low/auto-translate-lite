@@ -50,6 +50,7 @@ export interface WsServerDeps {
   promptConfigStore: PromptConfigStore;
   translationFlagDisplayStore: TranslationFlagDisplayStore;
   adminPasscode: string | undefined;
+  deepgramCostFlushIntervalMs: number;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
@@ -109,14 +110,29 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
   let deepgramConnection: DeepgramConnection | null = null;
   let recordingStartedAt: number | null = null;
   let unsubscribeCost: (() => void) | null = null;
+  let deepgramCostFlushInterval: ReturnType<typeof setInterval> | null = null;
 
   deps.session.captureSocket = ws;
 
+  // Deepgram bills by elapsed audio duration, not by discrete calls like the
+  // Gemini/OpenRouter usage tracked elsewhere — so "live" cost for it means
+  // periodically flushing the elapsed window rather than reacting to events.
+  // Rolls recordingStartedAt forward to the flush point so the next flush (or
+  // the final one in finalizeDeepgramCost) only covers the remaining window.
+  function recordElapsedDeepgramCost(): void {
+    if (recordingStartedAt === null) return;
+    const now = Date.now();
+    const elapsedSeconds = (now - recordingStartedAt) / 1000;
+    deps.costTracker.recordDeepgramSeconds(elapsedSeconds);
+    recordingStartedAt = now;
+  }
+
   function finalizeDeepgramCost(): void {
-    if (recordingStartedAt !== null) {
-      const elapsedSeconds = (Date.now() - recordingStartedAt) / 1000;
-      deps.costTracker.recordDeepgramSeconds(elapsedSeconds);
-      recordingStartedAt = null;
+    recordElapsedDeepgramCost();
+    recordingStartedAt = null;
+    if (deepgramCostFlushInterval !== null) {
+      clearInterval(deepgramCostFlushInterval);
+      deepgramCostFlushInterval = null;
     }
   }
 
@@ -185,6 +201,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
               onClose: () => {},
             });
             recordingStartedAt = Date.now();
+            deepgramCostFlushInterval = setInterval(recordElapsedDeepgramCost, deps.deepgramCostFlushIntervalMs);
             const recordingPayload = JSON.stringify({ type: 'status', status: 'recording' });
             ws.send(recordingPayload);
             deps.session.broadcastToReview(recordingPayload);

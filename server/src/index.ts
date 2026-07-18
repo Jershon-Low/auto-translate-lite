@@ -85,6 +85,7 @@ attachWsServer({
   promptConfigStore,
   translationFlagDisplayStore,
   adminPasscode: process.env.ADMIN_PASSCODE,
+  deepgramCostFlushIntervalMs: 5000,
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;
