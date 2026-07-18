@@ -74,31 +74,13 @@ export function attachWsServer(deps: WsServerDeps): void {
   });
 }
 
-function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
-  let deepgramConnection: DeepgramConnection | null = null;
-  let ingestQueue: Promise<void> = Promise.resolve();
-  let publishQueue: Promise<void> = Promise.resolve();
-  let recordingStartedAt: number | null = null;
-  let unsubscribeCost: (() => void) | null = null;
-
-  function finalizeDeepgramCost(): void {
-    if (recordingStartedAt !== null) {
-      const elapsedSeconds = (Date.now() - recordingStartedAt) / 1000;
-      deps.costTracker.recordDeepgramSeconds(elapsedSeconds);
-      recordingStartedAt = null;
-    }
-  }
-
-  // Fires the translate call immediately (so multiple lines' calls can run
-  // concurrently, bounded by GeminiCallLimiter), but only lets its result
-  // reach viewers once every earlier-queued line has already been published —
-  // so captions stay in original order even though the network calls overlap.
-  function enqueuePublish(
+function createEnqueuePublish(deps: WsServerDeps): EnqueuePublish {
+  return function enqueuePublish(
     line: CaptionLine,
     workPromise: Promise<Record<string, string>>,
     viewerMessageType: 'caption' | 'caption-inserted' = 'caption'
   ): void {
-    publishQueue = publishQueue
+    deps.session.publishQueue = deps.session.publishQueue
       .then(async () => {
         const translations = await workPromise;
         await finishPublishing(line, translations, deps, viewerMessageType);
@@ -110,6 +92,22 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
           error: error instanceof Error ? error.message : String(error),
         });
       });
+  };
+}
+
+function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
+  let deepgramConnection: DeepgramConnection | null = null;
+  let recordingStartedAt: number | null = null;
+  let unsubscribeCost: (() => void) | null = null;
+
+  deps.session.captureSocket = ws;
+
+  function finalizeDeepgramCost(): void {
+    if (recordingStartedAt !== null) {
+      const elapsedSeconds = (Date.now() - recordingStartedAt) / 1000;
+      deps.costTracker.recordDeepgramSeconds(elapsedSeconds);
+      recordingStartedAt = null;
+    }
   }
 
   // For lines not yet visible to viewers (AI-flagged or manual-hold): warms
@@ -122,6 +120,8 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
       line.pendingTranslations = translations;
     });
   }
+
+  const enqueuePublish = createEnqueuePublish(deps);
 
   ws.on('message', (data, isBinary) => {
     void (async () => {
@@ -157,7 +157,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
 
             deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
               onFinalSegment: (text) => {
-                ingestQueue = ingestQueue
+                deps.session.ingestQueue = deps.session.ingestQueue
                   .then(() => handleFinalSegmentFast(text, deps, ws, enqueuePublish, schedulePrefetch))
                   .catch((error) => {
                     void logEvent('error', {
@@ -191,7 +191,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             unsubscribeCost?.();
             unsubscribeCost = null;
           } else if (message.type === 'reinstate') {
-            ingestQueue = ingestQueue
+            deps.session.ingestQueue = deps.session.ingestQueue
               .then(() => handleReinstateFast(message.id, message.english, deps, ws, enqueuePublish))
               .catch((error) => {
                 void logEvent('error', {
@@ -201,7 +201,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                 });
               });
           } else if (message.type === 'admin-remove') {
-            ingestQueue = ingestQueue
+            deps.session.ingestQueue = deps.session.ingestQueue
               .then(() => handleAdminRemove(message.id, deps, ws))
               .catch((error) => {
                 void logEvent('error', {
@@ -226,6 +226,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
   });
 
   ws.on('close', () => {
+    if (deps.session.captureSocket === ws) deps.session.captureSocket = null;
     deps.session.stop();
     void deleteRoleCaches(deps.geminiClient, deps.session.roleCaches).then(() => {
       deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
