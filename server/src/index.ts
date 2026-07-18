@@ -12,6 +12,7 @@ import { createCostTracker } from './costTracker.js';
 import { createModelConfigStore } from './modelConfigStore.js';
 import { createPromptConfigStore } from './promptConfigStore.js';
 import { createTranslationFlagDisplayStore } from './translationFlagDisplayStore.js';
+import { createOpenRouterModelsStore } from './openRouterModelsStore.js';
 import { withCostTracking } from './geminiCostTracking.js';
 import { withGeminiLimiter } from './geminiRateLimiting.js';
 import { GeminiCallLimiter } from './geminiLimiter.js';
@@ -47,6 +48,9 @@ const viewerFeedbackStore = createViewerFeedbackStore(
 );
 const modelConfigStore = createModelConfigStore(process.env.MODEL_CONFIG_FILE_PATH ?? 'data/model-config.json');
 const promptConfigStore = createPromptConfigStore(process.env.PROMPT_CONFIG_FILE_PATH ?? 'data/prompt-config.json');
+const openRouterModelsStore = createOpenRouterModelsStore(
+  process.env.OPENROUTER_MODELS_FILE_PATH ?? 'data/openrouter-models.json'
+);
 const translationFlagDisplayStore = createTranslationFlagDisplayStore(
   process.env.TRANSLATION_FLAG_DISPLAY_FILE_PATH ?? 'data/translation-flag-display.json'
 );
@@ -58,6 +62,7 @@ const app = createApp({
   session,
   modelConfigStore,
   promptConfigStore,
+  openRouterModelsStore,
   translationFlagDisplayStore,
   adminPasscode: process.env.ADMIN_PASSCODE,
 });

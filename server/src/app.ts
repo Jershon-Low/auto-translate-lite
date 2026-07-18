@@ -14,6 +14,7 @@ import {
   validateTranslationFlagDisplayConfig,
   type TranslationFlagDisplayStore,
 } from './translationFlagDisplayStore.js';
+import type { OpenRouterModelsStore } from './openRouterModelsStore.js';
 import {
   TRANSLATION_FIXED_RULES,
   TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO,
@@ -29,6 +30,7 @@ export interface AppDeps {
   session: Session;
   modelConfigStore: ModelConfigStore;
   promptConfigStore: PromptConfigStore;
+  openRouterModelsStore: OpenRouterModelsStore;
   translationFlagDisplayStore: TranslationFlagDisplayStore;
   adminPasscode: string | undefined;
 }
@@ -163,6 +165,20 @@ export function createApp(deps: AppDeps): Express {
     }
     await deps.promptConfigStore.write(config);
     res.json({ ok: true });
+  });
+
+  app.get('/admin/openrouter-models', adminAuth, async (_req, res) => {
+    res.json({ models: await deps.openRouterModelsStore.read() });
+  });
+
+  app.post('/admin/openrouter-models', adminAuth, async (req, res) => {
+    const model = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
+    if (model.length === 0) {
+      res.status(400).json({ error: 'model is required' });
+      return;
+    }
+    const models = await deps.openRouterModelsStore.addModel(model);
+    res.json({ models });
   });
 
   app.get('/admin/translation-flag-display', adminAuth, async (_req, res) => {
