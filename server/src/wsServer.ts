@@ -36,6 +36,13 @@ type EnqueuePublish = (
   viewerMessageType?: 'caption' | 'caption-inserted'
 ) => void;
 
+interface PreparedLanguageResult {
+  language: string;
+  translated: string;
+  flagged: boolean;
+  reason?: string;
+}
+
 export interface WsServerDeps {
   httpServer: HttpServer;
   session: Session;
@@ -91,18 +98,24 @@ function createEnqueuePublish(deps: WsServerDeps): EnqueuePublish {
     workPromise: Promise<Record<string, string>>,
     viewerMessageType: 'caption' | 'caption-inserted' = 'caption'
   ): void {
-    deps.session.publishQueue = deps.session.publishQueue
-      .then(async () => {
-        const translations = await workPromise;
-        await finishPublishing(line, translations, deps, viewerMessageType);
-      })
+    // Translate + verify for this line starts immediately (not gated on the
+    // queue below), so a slow line doesn't stall the network work for lines
+    // behind it — only the final, already-computed send is kept in order.
+    const preparedPromise = workPromise
+      .then((translations) => prepareTranslationsForPublish(line, translations, deps))
       .catch((error) => {
         void logEvent('error', {
           event: 'publish_failed',
           english: line.english,
           error: error instanceof Error ? error.message : String(error),
         });
+        return null;
       });
+
+    deps.session.publishQueue = deps.session.publishQueue.then(async () => {
+      const results = await preparedPromise;
+      sendPrepared(line, results, deps, viewerMessageType);
+    });
   };
 }
 
@@ -327,20 +340,24 @@ function logTranslationFallback(
   void logEvent('warn', { event: 'translation_fallback', language, english, discardedTranslation, reason });
 }
 
-async function finishPublishing(
+// Runs the network-bound work (translation-verification) for a single line.
+// Deliberately not gated on publishQueue: called as soon as this line's own
+// translations resolve, so it can run concurrently with other lines' prep
+// instead of waiting its turn. Only the (cheap, synchronous) sendPrepared
+// step below needs to happen in order.
+async function prepareTranslationsForPublish(
   line: CaptionLine,
   translations: Record<string, string>,
-  deps: WsServerDeps,
-  viewerMessageType: 'caption' | 'caption-inserted' = 'caption'
-): Promise<void> {
+  deps: WsServerDeps
+): Promise<PreparedLanguageResult[] | null> {
   // The line may have been admin-removed (or otherwise suppressed) after it
   // was handed to enqueuePublish but before its translate work resolved.
   // Skip the publish entirely in that case — the viewer already got (or
   // will get) a line-removed broadcast for it.
-  if (line.suppressed) return;
+  if (line.suppressed) return null;
 
   const activeLanguages = deps.session.getActiveLanguages();
-  if (activeLanguages.length === 0) return;
+  if (activeLanguages.length === 0) return [];
 
   const verificationItems: VerificationItem[] = activeLanguages
     .filter((language) => Boolean(translations[language]))
@@ -348,6 +365,7 @@ async function finishPublishing(
   const verifications = await verifyTranslationsWithRetry(deps, verificationItems);
   const flagMode = deps.session.translationFlagDisplayMode === 'flag';
 
+  const results: PreparedLanguageResult[] = [];
   for (const language of activeLanguages) {
     const translated = translations[language];
     if (!translated) continue;
@@ -362,17 +380,34 @@ async function finishPublishing(
       logTranslationFallback(language, line.english, translated, reason);
     }
 
+    results.push({ language, translated: outgoing, flagged, reason: flagged ? reason : undefined });
+  }
+  return results;
+}
+
+// The ordered, synchronous half of publishing: writes the cache and sends to
+// viewers currently subscribed to each language. Kept inside publishQueue so
+// captions still arrive at viewers in the same order they were spoken.
+function sendPrepared(
+  line: CaptionLine,
+  results: PreparedLanguageResult[] | null,
+  deps: WsServerDeps,
+  viewerMessageType: 'caption' | 'caption-inserted'
+): void {
+  if (results === null) return;
+
+  for (const { language, translated, flagged, reason } of results) {
     deps.session.translationCache.set(
       language,
       line.id,
-      flagged ? { translated: outgoing, flagged: true, reason } : { translated: outgoing, flagged: false }
+      flagged ? { translated, flagged: true, reason: reason! } : { translated, flagged: false }
     );
 
     const payload = JSON.stringify({
       type: viewerMessageType,
       id: line.id,
       english: line.english,
-      translated: outgoing,
+      translated,
       ...(flagged ? { flagged: true, reason } : {}),
     });
     for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
@@ -521,6 +556,15 @@ async function handleFinalSegmentFast(
   const payload = JSON.stringify({ type: 'transcript', id: line.id, english: line.english });
   captureSocket.send(payload);
   deps.session.broadcastToReview(payload);
+
+  // Let viewers know Deepgram already produced this line before translation
+  // finishes — the view page renders it greyed-out until the real 'caption'
+  // (or 'line-removed') arrives, so slow translation is visibly distinct
+  // from a stalled transcription feed.
+  const pendingPayload = JSON.stringify({ type: 'caption-pending', id: line.id, english: line.english });
+  for (const viewerSocket of deps.session.getAllViewers()) {
+    viewerSocket.send(pendingPayload);
+  }
 
   const activeLanguages = deps.session.getActiveLanguages();
   const workPromise = translateWithFallback(deps, english, activeLanguages, precedingContext);

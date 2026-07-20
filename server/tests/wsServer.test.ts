@@ -111,9 +111,20 @@ function isTranslateCall(call: any): boolean {
   return !contents.includes('safety checker') && !contents.includes('transcription accuracy checker');
 }
 
+// Skips 'caption-pending' notices: an informational heads-up broadcast the
+// moment a line is ingested (before translation), which most tests here
+// aren't asserting on — they want the next substantive message.
 function waitForMessage(ws: WebSocket): Promise<any> {
   return new Promise((resolve) => {
-    ws.once('message', (data) => resolve(JSON.parse(data.toString())));
+    function onMessage(data: Buffer) {
+      const message = JSON.parse(data.toString());
+      if (message.type === 'caption-pending') {
+        ws.once('message', onMessage);
+        return;
+      }
+      resolve(message);
+    }
+    ws.once('message', onMessage);
   });
 }
 
@@ -491,14 +502,21 @@ describe('wsServer', () => {
       await waitForMessage(captureSocket); // Line 2 ack
 
       // Line 2's translate call already resolved. Give its publish work a
-      // chance to run, and confirm it does NOT jump ahead of Line 1.
+      // chance to run, and confirm it does NOT jump ahead of Line 1. Both
+      // lines' 'caption-pending' notices arrive immediately on ingest,
+      // independent of translate/publish ordering.
       await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(viewerMessages).toEqual([]);
+      expect(viewerMessages).toEqual([
+        { type: 'caption-pending', id: expect.any(String), english: 'Line 1' },
+        { type: 'caption-pending', id: expect.any(String), english: 'Line 2' },
+      ]);
 
       resolveFirstTranslate({ text: '{"zh":"你好1"}' });
       await new Promise((resolve) => setTimeout(resolve, 20));
 
       expect(viewerMessages).toEqual([
+        { type: 'caption-pending', id: expect.any(String), english: 'Line 1' },
+        { type: 'caption-pending', id: expect.any(String), english: 'Line 2' },
         { type: 'caption', id: expect.any(String), english: 'Line 1', translated: '你好1' },
         { type: 'caption', id: expect.any(String), english: 'Line 2', translated: '你好2' },
       ]);
@@ -1903,14 +1921,20 @@ describe('wsServer', () => {
       await removeAckPromise;
 
       await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(viewerMessages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+      expect(viewerMessages).toEqual([
+        { type: 'caption-pending', id: transcript.id, english: 'Hello everyone' },
+        { type: 'line-removed', id: transcript.id },
+      ]);
 
       // Now let the deferred translate resolve. The queued publish must be
       // skipped since the line was suppressed in the meantime.
       resolveTranslate({ text: '{"zh":"你好"}' });
       await new Promise((resolve) => setTimeout(resolve, 20));
 
-      expect(viewerMessages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+      expect(viewerMessages).toEqual([
+        { type: 'caption-pending', id: transcript.id, english: 'Hello everyone' },
+        { type: 'line-removed', id: transcript.id },
+      ]);
       expect(viewerMessages.some((message) => message.type === 'caption')).toBe(false);
 
       captureSocket.close();

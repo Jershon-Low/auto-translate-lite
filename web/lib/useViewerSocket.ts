@@ -9,6 +9,7 @@ export interface CaptionLine {
   removed?: boolean;
   flagged?: boolean;
   reason?: string;
+  pending?: boolean;
 }
 
 export type ViewerStatus = 'connecting' | 'reconnecting' | 'live';
@@ -36,16 +37,26 @@ export function useViewerSocket(language: string, wsUrl: string) {
         if (message.type === 'backlog') {
           setLines(message.lines);
           setStatus('live');
-        } else if (message.type === 'caption') {
-          setLines((previous) => [
-            ...previous,
-            {
+        } else if (message.type === 'caption-pending') {
+          setLines((previous) => {
+            if (previous.some((line) => line.id === message.id)) return previous;
+            return [...previous, { id: message.id, english: message.english, translated: '', pending: true }];
+          });
+          setStatus('live');
+        } else if (message.type === 'caption' || message.type === 'caption-inserted') {
+          setLines((previous) => {
+            const index = previous.findIndex((line) => line.id === message.id);
+            const resolved = {
               id: message.id,
               english: message.english,
               translated: message.translated,
               ...(message.flagged ? { flagged: true, reason: message.reason } : {}),
-            },
-          ]);
+            };
+            if (index === -1) return [...previous, resolved];
+            const next = [...previous];
+            next[index] = resolved;
+            return next;
+          });
           setStatus('live');
         } else if (message.type === 'line-removed') {
           setLines((previous) => {
@@ -54,21 +65,6 @@ export function useViewerSocket(language: string, wsUrl: string) {
             if (index === -1) return [...previous, placeholder];
             const next = [...previous];
             next[index] = placeholder;
-            return next;
-          });
-          setStatus('live');
-        } else if (message.type === 'caption-inserted') {
-          setLines((previous) => {
-            const index = previous.findIndex((line) => line.id === message.id);
-            const inserted = {
-              id: message.id,
-              english: message.english,
-              translated: message.translated,
-              ...(message.flagged ? { flagged: true, reason: message.reason } : {}),
-            };
-            if (index === -1) return [...previous, inserted];
-            const next = [...previous];
-            next[index] = inserted;
             return next;
           });
           setStatus('live');

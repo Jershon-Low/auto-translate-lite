@@ -21,8 +21,9 @@ Capture page --(audio via WebSocket)--> Server --(streaming audio)--> Deepgram
                               line to viewers subscribed to that language
 ```
 
-- **Capture page** — an AV volunteer's laptop streams mic/soundboard audio to the server. No language selection; just Start/Stop and a live status indicator.
-- **Server** (Node.js/TypeScript) — transcribes via Deepgram (`nova-3`), translates finalized sentences via Gemini, and fans out captions to viewers over WebSocket. Everything lives in memory — no database.
+- **Capture page** (`/capture`) — a single AV volunteer's laptop streams mic/soundboard audio to the server. Mic-only: Start/Stop, a live status indicator, and a read-only transcript. Passcode-gated.
+- **Review page** (`/review`) — the operator console, usable from any number of computers/people at once (independent of the one machine running capture). Live transcript checking (reinstate/remove flagged lines, automatic/manual approval mode with a pending queue and keyboard shortcuts), feedback notes, viewer-submitted feedback, sermon-document upload, and the running cost total. Shares the same passcode as capture.
+- **Server** (Node.js/TypeScript) — transcribes via Deepgram (`nova-3`), translates finalized sentences via Gemini, and fans out captions to viewers, the capture page, and every connected review page over WebSocket. Everything lives in memory — no database.
 - **Viewer page** — reached via QR code. Pick a language, see live captions with the English original shown above each translated line.
 
 Translation cost scales with *actual* usage: only languages with a connected viewer are translated, in one Gemini call per sentence covering every active language at once — not one call per language.
@@ -33,12 +34,12 @@ Live, unreviewed machine translation in front of a congregation carries real ris
 
 - **Theological/polarity safety checker** ([`translationVerifier.ts`](server/src/translationVerifier.ts)) — every translation is checked by a second Gemini call before it reaches a viewer. It flags translations that invert positive↔negative meaning, negate or contradict the original, reverse who's doing/receiving an action, or misrepresent God/Jesus/the Holy Spirit.
 - **Transcription accuracy check** ([`transcriptionVerifier.ts`](server/src/transcriptionVerifier.ts)) — before translation, a separate Gemini call checks the raw English transcript line itself (independent of any translation) for confident misrepresentation of God, Jesus, the Holy Spirit, or core Christian belief — the kind of thing a speech-to-text mishearing (a dropped or inserted "not", a misheard name) can produce even when the preacher's actual words were correct. It runs on every sentence for the whole session, not just while a viewer is watching, so a flagged line can never surface later in anyone's backlog either.
-- **Fail-safe fallback, not fail-open** — if a translation is flagged unsafe (or the safety check itself fails), the viewer sees the **English original** instead of a suspect translation. The system never ships a translation it couldn't verify. A flagged *transcript* line has no safe fallback to show — it *is* the source — so it's suppressed entirely from every viewer, live and backlog. The AV operator's own capture-page feed still shows it, marked as flagged, for operational awareness; it just never reaches the congregation.
+- **Fail-safe fallback, not fail-open** — if a translation is flagged unsafe (or the safety check itself fails), the viewer sees the **English original** instead of a suspect translation. The system never ships a translation it couldn't verify. A flagged *transcript* line has no safe fallback to show — it *is* the source — so it's suppressed entirely from every viewer, live and backlog. It still shows up, marked as flagged, on the capture page's read-only feed (for operational awareness) and on the review page, where an operator can reinstate a corrected version or remove it outright; it just never reaches the congregation until then.
 - **Idiom-aware, not over-cautious** — the checker is explicitly told not to flag natural, non-literal renderings of Australian slang and idiom ("no worries," "arvo," "having a go"), so it catches real meaning errors without constantly falling back to English.
 - **Audit logging** — every discarded/unsafe translation is logged server-side as structured JSON (language, original, discarded translation, reason), so mistranslation patterns can be reviewed after a service.
 - **Graceful degradation on API failure** — Gemini calls are retried once; if translation or verification still fails, that single sentence is skipped (or shown in English) rather than breaking the session for everyone.
 - **API keys never reach the browser** — Deepgram and Gemini keys live only in server-side env vars. The capture page only ever sends raw audio over its own WebSocket; the server proxies it to Deepgram.
-- **Minimal attack surface** — the WebSocket upgrade handler only accepts two known paths (`/ws/capture`, `/ws/viewer`); everything else is destroyed at the socket level. No accounts, no auth tokens, no PII collected or stored anywhere.
+- **Minimal attack surface** — the WebSocket upgrade handler only accepts three known paths (`/ws/capture`, `/ws/review`, `/ws/viewer`); everything else is destroyed at the socket level. `/ws/capture` and `/ws/review` require a shared operator passcode (`ADMIN_PASSCODE`); `/ws/viewer` (the congregant-facing side) is open, since there's no operator action to gate there. No per-user accounts or tokens, no PII collected or stored anywhere.
 - **No persistent data** — session/transcript state is in-memory only and cleared on restart. Nothing about who watched or what language they picked is retained.
 - **Deployment hardening** ([`docs/DEPLOY.md`](docs/DEPLOY.md)) — HTTPS everywhere via automatic Let's Encrypt certs (Caddy), SSH restricted to a single admin IP, only 80/443/22 open, `/health` endpoint for uptime checks.
 
@@ -57,7 +58,7 @@ Both external APIs are pay-as-you-go with no fixed minimum, and cost is driven b
 
 For a typical church running one ~60-minute translated service a week, that's **roughly $3.50–$5/month in API usage** — the AWS free tier (or a ~$5–10/month VPS after it expires) covers hosting on top of that. There's no seat licensing, no per-viewer surcharge, and no cost incurred outside of active Start/Stop sessions.
 
-The server also tracks this live: every Gemini call's real token usage (from the API response's `usageMetadata`, not an estimate) and every session's Deepgram streaming duration are converted to dollars using the rates below and shown as a running session/lifetime total on the capture page, persisted to `server/data/cost.json`. The table above is the *a priori* estimate; the capture page shows the *actual* running total for real usage.
+The server also tracks this live: every Gemini call's real token usage (from the API response's `usageMetadata`, not an estimate) and every session's Deepgram streaming duration are converted to dollars using the rates below and shown as a running session/lifetime total on the review page, persisted to `server/data/cost.json`. The table above is the *a priori* estimate; the review page shows the *actual* running total for real usage, updating every few seconds during an active recording rather than only once the session stops.
 
 *(Pricing verified against Deepgram's and Google's published rates as of mid-2026; actual token usage will vary with sentence count and how many languages are simultaneously active. The system logs every call, so real usage is easy to audit against these estimates once deployed.)*
 
@@ -93,7 +94,7 @@ That puts Auto Translate Lite at roughly **3–4× cheaper** than the most aggre
 Two apps run side by side:
 
 ```bash
-cd server && npm install && cp .env.example .env   # fill in DEEPGRAM_API_KEY and GEMINI_API_KEY
+cd server && npm install && cp .env.example .env   # fill in DEEPGRAM_API_KEY, GEMINI_API_KEY, and ADMIN_PASSCODE
 npm run dev   # http://localhost:3001
 ```
 
@@ -102,7 +103,7 @@ cd web && npm install && cp .env.example .env.local
 npm run dev   # http://localhost:3000
 ```
 
-Open `http://localhost:3000/capture` to start a session, and `http://localhost:3000` to pick a language and view live captions.
+Open `http://localhost:3000/capture` (one computer, mic-only Start/Stop) to run a session, `http://localhost:3000/review` (any number of computers) to check the transcript and control approval mode, and `http://localhost:3000` to pick a language and view live captions. `/capture` and `/review` both prompt for `ADMIN_PASSCODE` on first load.
 
 ## Tests
 

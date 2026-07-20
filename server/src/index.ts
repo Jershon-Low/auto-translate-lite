@@ -19,6 +19,7 @@ import { GeminiCallLimiter } from './geminiLimiter.js';
 import { createOpenRouterClient } from './openRouterClient.js';
 import { withOpenRouterCostTracking } from './openRouterCostTracking.js';
 import { withOpenRouterLimiter } from './openRouterLimiter.js';
+import { OpenRouterRateLimiter } from './openRouterRateLimiter.js';
 import { withOpenRouterReasoningLogging } from './openRouterReasoningLogging.js';
 
 const requiredEnvVars = ['DEEPGRAM_API_KEY', 'GEMINI_API_KEY'] as const;
@@ -36,10 +37,18 @@ const geminiClient = withCostTracking(
   costTracker
 );
 const openRouterLimiter = new GeminiCallLimiter();
+const openRouterRateLimiter = new OpenRouterRateLimiter(
+  process.env.OPENROUTER_MAX_CALLS_PER_WINDOW ? Number(process.env.OPENROUTER_MAX_CALLS_PER_WINDOW) : 5,
+  process.env.OPENROUTER_RATE_WINDOW_MS ? Number(process.env.OPENROUTER_RATE_WINDOW_MS) : 2000
+);
 const openRouterClient = process.env.OPENROUTER_API_KEY
   ? withOpenRouterReasoningLogging(
       withOpenRouterCostTracking(
-        withOpenRouterLimiter(createOpenRouterClient(process.env.OPENROUTER_API_KEY), openRouterLimiter),
+        withOpenRouterLimiter(
+          createOpenRouterClient(process.env.OPENROUTER_API_KEY),
+          openRouterLimiter,
+          openRouterRateLimiter
+        ),
         costTracker
       )
     )

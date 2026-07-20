@@ -243,11 +243,17 @@ function ViewerPageContent() {
           ) : (
             <div key={line.id} className="flex items-start gap-2 hover:bg-accent/50 p-2 rounded-md transition-colors">
               <div className="flex-1 min-w-0">
-                <p className="text-sm text-muted-foreground">{line.english}</p>
-                <p className={`text-xl sm:text-2xl ${line.flagged ? 'text-rose-400' : ''}`}>{line.translated}</p>
+                {!line.pending && <p className="text-sm text-muted-foreground">{line.english}</p>}
+                <p
+                  className={`text-xl sm:text-2xl transition-colors duration-500 ${
+                    line.pending ? 'italic text-muted-foreground/60' : line.flagged ? 'text-rose-400' : ''
+                  }`}
+                >
+                  {line.pending ? line.english : line.translated}
+                </p>
                 {line.flagged && line.reason && <p className="text-xs text-rose-400/80">{line.reason}</p>}
               </div>
-              {renderLineFeedback(index, line)}
+              {!line.pending && renderLineFeedback(index, line)}
             </div>
           )
         )}

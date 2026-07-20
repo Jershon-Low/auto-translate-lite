@@ -97,22 +97,14 @@ export default function CapturePage() {
     setIsFollowing(true);
   }
 
-  async function ensureRecorderStreaming(socket: WebSocket) {
+  function attachRecorder(socket: WebSocket) {
     if (!streamRef.current) {
-      try {
-        streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (error) {
-        setErrorMessage(
-          error instanceof Error
-            ? `Microphone access failed: ${error.message}`
-            : "Microphone access failed. Check your browser's microphone permission for this site."
-        );
-        manuallyStoppedRef.current = true;
-        socket.send(JSON.stringify({ type: 'stop' }));
-        socket.close();
-        setStatus('error');
-        return;
-      }
+      setErrorMessage("Microphone access failed. Check your browser's microphone permission for this site.");
+      manuallyStoppedRef.current = true;
+      socket.send(JSON.stringify({ type: 'stop' }));
+      socket.close();
+      setStatus('error');
+      return;
     }
     const recorder = new MediaRecorder(streamRef.current, { mimeType: 'audio/webm;codecs=opus' });
     recorderRef.current = recorder;
@@ -152,7 +144,7 @@ export default function CapturePage() {
 
     socket.onopen = () => {
       socket.send(JSON.stringify({ type: 'start' }));
-      void ensureRecorderStreaming(socket);
+      attachRecorder(socket);
     };
 
     socket.onclose = () => {
@@ -165,11 +157,32 @@ export default function CapturePage() {
     };
   }
 
-  function start() {
+  async function start() {
     manuallyStoppedRef.current = false;
     setErrorMessage(null);
     setTranscriptLines([]);
     setIsFollowing(true);
+
+    // Acquired synchronously in response to the click (not inside an async
+    // socket callback) — some browsers only reliably deliver live audio
+    // frames when getUserMedia is called directly within the user-gesture
+    // chain, even if the permission was already granted. Re-requesting fresh
+    // on every start (rather than reusing a stream left over from a previous
+    // recording) also avoids a stale/half-released device from a prior stop().
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    try {
+      streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? `Microphone access failed: ${error.message}`
+          : "Microphone access failed. Check your browser's microphone permission for this site."
+      );
+      setStatus('error');
+      return;
+    }
+
     connectSocket();
   }
 
