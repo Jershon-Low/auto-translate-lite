@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -42,6 +42,19 @@ interface TranslationFlagDisplayConfig {
   mode: TranslationFlagDisplayMode;
 }
 
+interface LogEntry {
+  timestamp: string;
+  level: 'info' | 'warn' | 'error';
+  event?: string;
+  [key: string]: unknown;
+}
+
+const CLIENT_LOG_CAP = 2000;
+
+function capEntries(entries: LogEntry[]): LogEntry[] {
+  return entries.length > CLIENT_LOG_CAP ? entries.slice(entries.length - CLIENT_LOG_CAP) : entries;
+}
+
 const ROLE_LABELS: Record<Role, string> = {
   transcriptionVerifier: 'Transcription verifier',
   translation: 'Translation',
@@ -57,6 +70,18 @@ const REASONING_LABELS: Record<OpenRouterReasoningEffort, string> = {
   medium: 'Medium',
   high: 'High',
 };
+
+const LEVEL_ROW_CLASS: Record<LogEntry['level'], string> = {
+  info: 'text-foreground',
+  warn: 'text-amber-600 dark:text-amber-400',
+  error: 'text-red-600 dark:text-red-400',
+};
+
+function formatEntry(entry: LogEntry): string {
+  const { timestamp, level, event, ...rest } = entry;
+  const restText = Object.keys(rest).length > 0 ? ' ' + JSON.stringify(rest) : '';
+  return `${timestamp} [${level}] ${event ?? ''}${restText}`.trimEnd();
+}
 
 export default function AdminPage() {
   const [passcode, setPasscode] = useState('');
@@ -82,12 +107,71 @@ export default function AdminPage() {
     translationVerifier: '',
   });
 
+  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [logStatus, setLogStatus] = useState<'connecting' | 'connected' | 'reconnecting'>('connecting');
+  const logScrollRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     const stored = window.sessionStorage.getItem('adminPasscode');
     if (stored) {
       void loadAll(stored);
     }
   }, []);
+
+  useEffect(() => {
+    if (!authorized || passcode.length === 0) return;
+
+    let socket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let closedByEffect = false;
+    let attempts = 0;
+
+    function connect() {
+      socket = new WebSocket(`${WS_URL}/ws/logs?passcode=${encodeURIComponent(passcode)}`);
+
+      socket.onopen = () => {
+        attempts = 0;
+        setLogStatus('connected');
+      };
+
+      socket.onmessage = (event) => {
+        const message = JSON.parse(event.data as string);
+        if (message.type === 'history') {
+          // A (re)connect delivers the current server buffer; replace the view
+          // with it so a reconnect after a server restart self-heals without
+          // duplicating entries.
+          setLogEntries(capEntries(message.entries as LogEntry[]));
+        } else if (message.type === 'log') {
+          setLogEntries((prev) => capEntries([...prev, message.entry as LogEntry]));
+        }
+      };
+
+      socket.onclose = () => {
+        if (closedByEffect) return;
+        setLogStatus('reconnecting');
+        attempts += 1;
+        const backoff = Math.min(1000 * 2 ** (attempts - 1), 10000);
+        reconnectTimer = setTimeout(connect, backoff);
+      };
+
+      socket.onerror = () => {
+        socket?.close();
+      };
+    }
+
+    connect();
+
+    return () => {
+      closedByEffect = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+  }, [authorized, passcode]);
+
+  useEffect(() => {
+    const el = logScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [logEntries]);
 
   async function loadAll(candidatePasscode: string) {
     setCheckingAuth(true);
@@ -264,6 +348,7 @@ export default function AdminPage() {
           <TabsTrigger value="models">Models</TabsTrigger>
           <TabsTrigger value="notes">Prompt notes</TabsTrigger>
           <TabsTrigger value="display">Display</TabsTrigger>
+          <TabsTrigger value="logs">Logs</TabsTrigger>
         </TabsList>
 
         <TabsContent value="models" className="flex flex-col gap-4">
@@ -457,6 +542,24 @@ export default function AdminPage() {
             <Button variant="secondary" onClick={saveDisplayConfig} disabled={displaySaveStatus === 'saving'}>
               Save display setting
             </Button>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="logs" className="flex flex-col gap-3">
+          <div className="text-xs text-muted-foreground">
+            {logStatus === 'connected' ? 'Live' : logStatus === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}
+            {' · '}
+            {logEntries.length} entries
+          </div>
+          <div
+            ref={logScrollRef}
+            className="h-[60vh] overflow-auto rounded-md border bg-muted/30 p-2 font-mono text-xs leading-relaxed"
+          >
+            {logEntries.map((entry, index) => (
+              <div key={index} className={`whitespace-pre-wrap break-all ${LEVEL_ROW_CLASS[entry.level]}`}>
+                {formatEntry(entry)}
+              </div>
+            ))}
           </div>
         </TabsContent>
       </Tabs>
