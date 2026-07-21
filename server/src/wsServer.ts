@@ -124,6 +124,37 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
   let recordingStartedAt: number | null = null;
   let unsubscribeCost: (() => void) | null = null;
   let deepgramCostFlushInterval: ReturnType<typeof setInterval> | null = null;
+  // TEMP DIAGNOSTIC (remove after debugging localhost transcription): counts the
+  // audio actually forwarded to Deepgram this recording. Tiny bytes/chunk ≈ silence
+  // (mic problem); ~3-4 KB/chunk ≈ real audio (problem is downstream, not the mic).
+  let audioChunkCount = 0;
+  let audioByteCount = 0;
+
+  // Audio can arrive from the browser before the Deepgram live connection has
+  // finished opening — the 'start' handler awaits config + Gemini role caches
+  // before creating the connection, and the connection itself takes a moment to
+  // open. The very first MediaRecorder chunk carries the WebM/EBML init header;
+  // if it's dropped, Deepgram can never decode the stream (it reports
+  // duration:0 and returns no transcripts). So hold audio until the connection
+  // is open, then flush it in order — header first.
+  let deepgramReady = false;
+  let pendingAudio: Buffer[] = [];
+  let pendingAudioBytes = 0;
+  const MAX_PENDING_AUDIO_BYTES = 5_000_000;
+
+  function resetAudioBuffering(): void {
+    deepgramReady = false;
+    pendingAudio = [];
+    pendingAudioBytes = 0;
+  }
+
+  // Send everything buffered during startup to Deepgram in arrival order (the
+  // WebM header chunk first), then clear the buffer.
+  function flushPendingAudio(): void {
+    for (const chunk of pendingAudio) deepgramConnection?.send(chunk);
+    pendingAudio = [];
+    pendingAudioBytes = 0;
+  }
 
   deps.session.captureSocket = ws;
 
@@ -194,7 +225,14 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
               },
             });
 
+            audioChunkCount = 0;
+            audioByteCount = 0;
+            resetAudioBuffering();
             deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
+              onOpen: () => {
+                deepgramReady = true;
+                flushPendingAudio();
+              },
               onFinalSegment: (text) => {
                 deps.session.ingestQueue = deps.session.ingestQueue
                   .then(() => handleFinalSegmentFast(text, deps, ws, enqueuePublish, schedulePrefetch))
@@ -211,7 +249,11 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                 ws.send(errorPayload);
                 deps.session.broadcastToReview(errorPayload);
               },
-              onClose: () => {},
+              onClose: () => {
+                // Stop forwarding to a closed connection; further audio is held
+                // (capped) rather than sent into a dead socket.
+                deepgramReady = false;
+              },
             });
             recordingStartedAt = Date.now();
             deepgramCostFlushInterval = setInterval(recordElapsedDeepgramCost, deps.deepgramCostFlushIntervalMs);
@@ -226,11 +268,19 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
               deps.session.broadcastToReview(costPayload);
             });
           } else if (message.type === 'stop') {
+            void logEvent('info', {
+              event: 'capture_audio_stats_diag',
+              sessionId: deps.session.id,
+              audioChunkCount,
+              audioByteCount,
+              avgBytesPerChunk: audioChunkCount > 0 ? Math.round(audioByteCount / audioChunkCount) : 0,
+            });
             deps.session.stop();
             await deleteRoleCaches(deps.geminiClient, deps.session.roleCaches);
             deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
             deepgramConnection?.finish();
             deepgramConnection = null;
+            resetAudioBuffering();
             const idlePayload = JSON.stringify({ type: 'status', status: 'idle' });
             ws.send(idlePayload);
             deps.session.broadcastToReview(idlePayload);
@@ -239,8 +289,18 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             unsubscribeCost?.();
             unsubscribeCost = null;
           }
-        } else if (deepgramConnection) {
-          deepgramConnection.send(data as Buffer);
+        } else {
+          const chunk = data as Buffer;
+          audioChunkCount += 1;
+          audioByteCount += chunk.length;
+          if (deepgramConnection && deepgramReady) {
+            deepgramConnection.send(chunk);
+          } else if (pendingAudioBytes + chunk.length <= MAX_PENDING_AUDIO_BYTES) {
+            // Deepgram not open yet — hold the chunk (esp. the WebM header) so it
+            // isn't lost to the startup race; onOpen flushes these in order.
+            pendingAudio.push(chunk);
+            pendingAudioBytes += chunk.length;
+          }
         }
       } catch (error) {
         void logEvent('error', {
@@ -252,12 +312,21 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
   });
 
   ws.on('close', () => {
+    void logEvent('info', {
+      event: 'capture_audio_stats_diag',
+      sessionId: deps.session.id,
+      reason: 'socket_closed',
+      audioChunkCount,
+      audioByteCount,
+      avgBytesPerChunk: audioChunkCount > 0 ? Math.round(audioByteCount / audioChunkCount) : 0,
+    });
     if (deps.session.captureSocket === ws) deps.session.captureSocket = null;
     deps.session.stop();
     void deleteRoleCaches(deps.geminiClient, deps.session.roleCaches).then(() => {
       deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
     });
     deepgramConnection?.finish();
+    resetAudioBuffering();
 
     // Unsubscribe before finalizing: the socket is already closed by the time
     // this event fires, so the cost-update listener must not attempt a send.
