@@ -110,6 +110,23 @@ export default function AdminPage() {
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [logStatus, setLogStatus] = useState<'connecting' | 'connected' | 'reconnecting'>('connecting');
   const logScrollRef = useRef<HTMLDivElement>(null);
+  const [levelFilter, setLevelFilter] = useState<Record<LogEntry['level'], boolean>>({
+    info: true,
+    warn: true,
+    error: true,
+  });
+  const [logSearch, setLogSearch] = useState('');
+  const [logsPaused, setLogsPaused] = useState(false);
+
+  const visibleLogEntries = logEntries.filter((entry) => {
+    if (!levelFilter[entry.level]) return false;
+    const query = logSearch.trim().toLowerCase();
+    if (query.length > 0) {
+      const haystack = `${entry.event ?? ''} ${JSON.stringify(entry)}`.toLowerCase();
+      if (!haystack.includes(query)) return false;
+    }
+    return true;
+  });
 
   useEffect(() => {
     const stored = window.sessionStorage.getItem('adminPasscode');
@@ -169,9 +186,10 @@ export default function AdminPage() {
   }, [authorized, passcode]);
 
   useEffect(() => {
+    if (logsPaused) return;
     const el = logScrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [logEntries]);
+  }, [visibleLogEntries, logsPaused]);
 
   async function loadAll(candidatePasscode: string) {
     setCheckingAuth(true);
@@ -304,6 +322,25 @@ export default function AdminPage() {
       toast.error('Save failed. Check your connection and try again.');
       setDisplaySaveStatus('idle');
     }
+  }
+
+  function copyLogs() {
+    void navigator.clipboard.writeText(visibleLogEntries.map(formatEntry).join('\n'));
+    toast.success('Logs copied.');
+  }
+
+  function downloadLogs() {
+    const blob = new Blob([visibleLogEntries.map(formatEntry).join('\n')], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `logs-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function clearLogs() {
+    setLogEntries([]);
   }
 
   if (!authorized) {
@@ -546,16 +583,43 @@ export default function AdminPage() {
         </TabsContent>
 
         <TabsContent value="logs" className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <ToggleGroup
+              multiple
+              value={(Object.keys(levelFilter) as LogEntry['level'][]).filter((level) => levelFilter[level])}
+              onValueChange={(values) => {
+                const active = new Set(values as LogEntry['level'][]);
+                setLevelFilter({ info: active.has('info'), warn: active.has('warn'), error: active.has('error') });
+              }}
+            >
+              <ToggleGroupItem value="info" size="sm">Info</ToggleGroupItem>
+              <ToggleGroupItem value="warn" size="sm">Warn</ToggleGroupItem>
+              <ToggleGroupItem value="error" size="sm">Error</ToggleGroupItem>
+            </ToggleGroup>
+            <Input
+              value={logSearch}
+              onChange={(event) => setLogSearch(event.target.value)}
+              placeholder="Filter…"
+              className="h-8 w-40"
+            />
+            <Button variant="secondary" size="sm" onClick={() => setLogsPaused((paused) => !paused)}>
+              {logsPaused ? 'Resume' : 'Pause'}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={clearLogs}>Clear</Button>
+            <Button variant="secondary" size="sm" onClick={copyLogs}>Copy</Button>
+            <Button variant="secondary" size="sm" onClick={downloadLogs}>Download</Button>
+          </div>
           <div className="text-xs text-muted-foreground">
             {logStatus === 'connected' ? 'Live' : logStatus === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}
+            {logsPaused ? ' · Paused' : ''}
             {' · '}
-            {logEntries.length} entries
+            {visibleLogEntries.length} / {logEntries.length} entries
           </div>
           <div
             ref={logScrollRef}
             className="h-[60vh] overflow-auto rounded-md border bg-muted/30 p-2 font-mono text-xs leading-relaxed"
           >
-            {logEntries.map((entry, index) => (
+            {visibleLogEntries.map((entry, index) => (
               <div key={index} className={`whitespace-pre-wrap break-all ${LEVEL_ROW_CLASS[entry.level]}`}>
                 {formatEntry(entry)}
               </div>
