@@ -132,11 +132,18 @@ function waitForOpen(ws: WebSocket): Promise<void> {
   return new Promise((resolve) => ws.once('open', () => resolve()));
 }
 
+// Binary audio frames produce no server response, so give the server a moment
+// to receive and process them over the loopback socket before asserting.
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 describe('wsServer', () => {
   let httpServer: Server;
   let port: number;
   let session: Session;
   let capturedCallbacks: DeepgramCallbacks | null;
+  let capturedConnection: { send: ReturnType<typeof vi.fn>; finish: ReturnType<typeof vi.fn> } | null;
   let geminiClient: GeminiClient;
   let sermonDocStore: SermonDocStore;
   let feedbackStore: FeedbackStore;
@@ -147,6 +154,7 @@ describe('wsServer', () => {
   beforeEach(async () => {
     session = new Session();
     capturedCallbacks = null;
+    capturedConnection = null;
     httpServer = createServer();
 
     geminiClient = fakeGeminiClient();
@@ -163,7 +171,8 @@ describe('wsServer', () => {
       deepgramApiKey: 'fake-key',
       createDeepgramConnection: (_apiKey, callbacks) => {
         capturedCallbacks = callbacks;
-        return { send: vi.fn(), finish: vi.fn() };
+        capturedConnection = { send: vi.fn(), finish: vi.fn() };
+        return capturedConnection;
       },
       sermonDocStore,
       feedbackStore,
@@ -182,6 +191,39 @@ describe('wsServer', () => {
 
   afterEach(() => {
     httpServer.close();
+  });
+
+  it('buffers audio arriving before Deepgram opens and flushes it in order (preserves the WebM header)', async () => {
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket);
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+
+    // The connection has been created, but onOpen has not fired yet.
+    expect(capturedConnection).not.toBeNull();
+
+    // First chunk stands in for the WebM/EBML init header; both arrive pre-open.
+    const header = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x01, 0x02]);
+    const body = Buffer.from([0x11, 0x22, 0x33]);
+    captureSocket.send(header);
+    captureSocket.send(body);
+    await delay(80);
+
+    // Must be held, not dropped and not sent to a not-yet-open connection.
+    expect(capturedConnection!.send).not.toHaveBeenCalled();
+
+    // Once open, buffered audio is flushed in arrival order — header first.
+    capturedCallbacks!.onOpen!();
+    expect(capturedConnection!.send.mock.calls.map((call) => call[0])).toEqual([header, body]);
+
+    // Subsequent audio streams straight through.
+    const live = Buffer.from([0x44, 0x55]);
+    captureSocket.send(live);
+    await delay(80);
+    expect(capturedConnection!.send).toHaveBeenCalledTimes(3);
+    expect(capturedConnection!.send.mock.calls[2][0]).toEqual(live);
+
+    captureSocket.close();
   });
 
   it('broadcasts a translated caption to a subscribed viewer', async () => {
