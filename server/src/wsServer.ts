@@ -20,6 +20,13 @@ import type { LogHub } from './logHub.js';
 
 const PRECEDING_CONTEXT_LINES = 7;
 
+// ws.send() is non-blocking, so a live-tail /ws/logs viewer that can't keep up
+// (e.g. a stalled tab) would otherwise let its outgoing send buffer grow
+// without bound on every log entry. The on-disk log remains the durable
+// record, so once a socket is saturated it simply drops intermediate entries
+// rather than accumulating an unbounded backlog.
+const MAX_LOGS_SOCKET_BUFFER_BYTES = 1_000_000;
+
 // Only a failure that actually implicates the cached-content reference (e.g.
 // an expired/deleted cache) should drop a role's cache for the rest of the
 // session. Any other failure — a rate limit, a network blip, a malformed
@@ -412,10 +419,15 @@ function handleReviewConnection(ws: WebSocket, deps: WsServerDeps): void {
 function handleLogsConnection(ws: WebSocket, deps: WsServerDeps): void {
   // Recent context first, then live entries. This is a read-only channel:
   // inbound messages from a logs socket are ignored.
-  ws.send(JSON.stringify({ type: 'history', entries: deps.logHub.getHistory() }));
+  try {
+    ws.send(JSON.stringify({ type: 'history', entries: deps.logHub.getHistory() }));
+  } catch {
+    // A dead/broken socket must never propagate back into logHub.push and
+    // break logging for everyone else; the close handler unsubscribes it.
+  }
 
   const unsubscribe = deps.logHub.subscribe((entry) => {
-    if (ws.readyState !== WebSocket.OPEN) return;
+    if (ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > MAX_LOGS_SOCKET_BUFFER_BYTES) return;
     try {
       ws.send(JSON.stringify({ type: 'log', entry }));
     } catch {

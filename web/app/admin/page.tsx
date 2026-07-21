@@ -152,7 +152,12 @@ export default function AdminPage() {
       };
 
       socket.onmessage = (event) => {
-        const message = JSON.parse(event.data as string);
+        let message: { type?: string; entries?: LogEntry[]; entry?: LogEntry };
+        try {
+          message = JSON.parse(event.data as string);
+        } catch {
+          return; // ignore a malformed frame
+        }
         if (message.type === 'history') {
           // A (re)connect delivers the current server buffer; replace the view
           // with it so a reconnect after a server restart self-heals without
@@ -620,7 +625,7 @@ export default function AdminPage() {
             className="h-[60vh] overflow-auto rounded-md border bg-muted/30 p-2 font-mono text-xs leading-relaxed"
           >
             {visibleLogEntries.map((entry, index) => (
-              <div key={index} className={`whitespace-pre-wrap break-all ${LEVEL_ROW_CLASS[entry.level]}`}>
+              <div key={index} className={`whitespace-pre-wrap break-all ${LEVEL_ROW_CLASS[entry.level] ?? LEVEL_ROW_CLASS.info}`}>
                 {formatEntry(entry)}
               </div>
             ))}
