@@ -1,8 +1,9 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { logEvent } from '../src/logger';
+import { logHub } from '../src/logHub';
 
 describe('logEvent', () => {
   let tempDir: string;
@@ -53,5 +54,15 @@ describe('logEvent', () => {
     expect(errorSpy).toHaveBeenCalledTimes(1);
     warnSpy.mockRestore();
     errorSpy.mockRestore();
+  });
+
+  it('pushes a well-formed entry into logHub', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'logger-test-'));
+    process.env.LOG_FILE_PATH = join(tempDir, 'events.log');
+
+    await logEvent('warn', { event: 'unit_test_event', detail: 42 });
+    const last = logHub.getHistory().at(-1);
+    expect(last).toMatchObject({ level: 'warn', event: 'unit_test_event', detail: 42 });
+    expect(typeof last?.timestamp).toBe('string');
   });
 });
