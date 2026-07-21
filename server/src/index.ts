@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { createApp } from './app.js';
 import { attachWsServer } from './wsServer.js';
 import { Session } from './session.js';
+import { logHub } from './logHub.js';
 import { createGeminiClient } from './gemini.js';
 import { createDeepgramConnection } from './deepgram.js';
 import { createSermonDocStore } from './sermonDocStore.js';
@@ -94,6 +95,7 @@ attachWsServer({
   promptConfigStore,
   translationFlagDisplayStore,
   adminPasscode: process.env.ADMIN_PASSCODE,
+  logHub,
   deepgramCostFlushIntervalMs: 5000,
 });
 

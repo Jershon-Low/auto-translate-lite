@@ -15,6 +15,7 @@ import {
   DEFAULT_TRANSLATION_FLAG_DISPLAY_CONFIG,
   type TranslationFlagDisplayStore,
 } from '../src/translationFlagDisplayStore';
+import { createLogHub, type LogHub } from '../src/logHub';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -149,6 +150,7 @@ describe('wsServer', () => {
   let feedbackStore: FeedbackStore;
   let costTracker: ReturnType<typeof fakeCostTracker>;
   let translationFlagDisplayStore: TranslationFlagDisplayStore;
+  let logHub: LogHub;
   let deps: Parameters<typeof attachWsServer>[0];
 
   beforeEach(async () => {
@@ -162,6 +164,7 @@ describe('wsServer', () => {
     feedbackStore = fakeFeedbackStore(CACHE_PADDING);
     costTracker = fakeCostTracker();
     translationFlagDisplayStore = fakeTranslationFlagDisplayStore();
+    logHub = createLogHub();
 
     deps = {
       httpServer,
@@ -180,6 +183,7 @@ describe('wsServer', () => {
       modelConfigStore: fakeModelConfigStore(),
       promptConfigStore: fakePromptConfigStore(),
       translationFlagDisplayStore,
+      logHub,
       adminPasscode: 'test-passcode',
       deepgramCostFlushIntervalMs: 5000,
     };
@@ -191,6 +195,43 @@ describe('wsServer', () => {
 
   afterEach(() => {
     httpServer.close();
+  });
+
+  it('rejects a /ws/logs connection without the admin passcode', async () => {
+    const socket = new WebSocket(`ws://localhost:${port}/ws/logs`);
+    await new Promise<void>((resolve) => {
+      socket.once('close', () => resolve());
+      socket.once('error', () => resolve());
+    });
+    expect(socket.readyState).toBeGreaterThanOrEqual(WebSocket.CLOSING);
+  });
+
+  it('sends buffered history to a new /ws/logs subscriber', async () => {
+    logHub.push({ timestamp: new Date().toISOString(), level: 'info', event: 'preexisting' });
+    const socket = new WebSocket(`ws://localhost:${port}/ws/logs?passcode=test-passcode`);
+    // The server sends 'history' as soon as the connection is accepted — the
+    // same tick as (or before, in ws's internal scheduling) the client's
+    // 'open' event — so the message listener must be attached before
+    // awaiting 'open', not after, or the message can arrive unobserved.
+    const historyPromise = waitForMessage(socket);
+    await waitForOpen(socket);
+    const message = await historyPromise;
+    expect(message.type).toBe('history');
+    expect(message.entries).toEqual([{ timestamp: expect.any(String), level: 'info', event: 'preexisting' }]);
+    socket.close();
+  });
+
+  it('forwards a newly pushed log entry to a subscribed /ws/logs socket', async () => {
+    const socket = new WebSocket(`ws://localhost:${port}/ws/logs?passcode=test-passcode`);
+    const historyPromise = waitForMessage(socket);
+    await waitForOpen(socket);
+    await historyPromise; // history (empty)
+    const logPromise = waitForMessage(socket);
+    logHub.push({ timestamp: new Date().toISOString(), level: 'warn', event: 'translation_fallback' });
+    const message = await logPromise;
+    expect(message.type).toBe('log');
+    expect(message.entry.event).toBe('translation_fallback');
+    socket.close();
   });
 
   it('buffers audio arriving before Deepgram opens and flushes it in order (preserves the WebM header)', async () => {

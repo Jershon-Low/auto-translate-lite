@@ -16,6 +16,7 @@ import type { ModelConfigStore } from './modelConfigStore.js';
 import type { PromptConfigStore } from './promptConfigStore.js';
 import type { TranslationFlagDisplayStore } from './translationFlagDisplayStore.js';
 import { logEvent } from './logger.js';
+import type { LogHub } from './logHub.js';
 
 const PRECEDING_CONTEXT_LINES = 7;
 
@@ -57,6 +58,7 @@ export interface WsServerDeps {
   promptConfigStore: PromptConfigStore;
   translationFlagDisplayStore: TranslationFlagDisplayStore;
   adminPasscode: string | undefined;
+  logHub: LogHub;
   deepgramCostFlushIntervalMs: number;
 }
 
@@ -65,11 +67,16 @@ export function attachWsServer(deps: WsServerDeps): void {
 
   deps.httpServer.on('upgrade', (request, socket, head) => {
     const { pathname, searchParams } = new URL(request.url ?? '', 'http://localhost');
-    if (pathname !== '/ws/capture' && pathname !== '/ws/viewer' && pathname !== '/ws/review') {
+    if (
+      pathname !== '/ws/capture' &&
+      pathname !== '/ws/viewer' &&
+      pathname !== '/ws/review' &&
+      pathname !== '/ws/logs'
+    ) {
       socket.destroy();
       return;
     }
-    if (pathname === '/ws/capture' || pathname === '/ws/review') {
+    if (pathname === '/ws/capture' || pathname === '/ws/review' || pathname === '/ws/logs') {
       const providedPasscode = searchParams.get('passcode');
       if (!deps.adminPasscode || providedPasscode !== deps.adminPasscode) {
         socket.destroy();
@@ -86,6 +93,8 @@ export function attachWsServer(deps: WsServerDeps): void {
       handleCaptureConnection(ws, deps);
     } else if (pathname === '/ws/review') {
       handleReviewConnection(ws, deps);
+    } else if (pathname === '/ws/logs') {
+      handleLogsConnection(ws, deps);
     } else {
       handleViewerConnection(ws, deps);
     }
@@ -398,6 +407,25 @@ function handleReviewConnection(ws: WebSocket, deps: WsServerDeps): void {
   });
 
   ws.on('close', () => deps.session.removeReview(ws));
+}
+
+function handleLogsConnection(ws: WebSocket, deps: WsServerDeps): void {
+  // Recent context first, then live entries. This is a read-only channel:
+  // inbound messages from a logs socket are ignored.
+  ws.send(JSON.stringify({ type: 'history', entries: deps.logHub.getHistory() }));
+
+  const unsubscribe = deps.logHub.subscribe((entry) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify({ type: 'log', entry }));
+    } catch {
+      // A dead/broken socket must never propagate back into logHub.push and
+      // break logging for everyone else; the close handler unsubscribes it.
+    }
+  });
+
+  ws.on('close', () => unsubscribe());
+  ws.on('error', () => unsubscribe());
 }
 
 function logTranslationFallback(
