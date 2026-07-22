@@ -97,6 +97,9 @@ attachWsServer({
   adminPasscode: process.env.ADMIN_PASSCODE,
   logHub,
   deepgramCostFlushIntervalMs: 5000,
+  viewerBacklogTranslateLimit: process.env.VIEWER_BACKLOG_TRANSLATE_LIMIT
+    ? Number(process.env.VIEWER_BACKLOG_TRANSLATE_LIMIT)
+    : 30,
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;
