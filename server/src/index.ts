@@ -81,6 +81,14 @@ const app = createApp({
 });
 const httpServer = createServer(app);
 
+// Unset/empty -> default 30; a malformed (non-numeric) value falls back to 30
+// too, rather than becoming NaN (which the backlog cap would read as "translate
+// zero lines" — silently disabling backlog translation on a config typo).
+const rawBacklogLimit = process.env.VIEWER_BACKLOG_TRANSLATE_LIMIT;
+const parsedBacklogLimit = Number(rawBacklogLimit);
+const viewerBacklogTranslateLimit =
+  rawBacklogLimit && Number.isFinite(parsedBacklogLimit) ? parsedBacklogLimit : 30;
+
 attachWsServer({
   httpServer,
   session,
@@ -97,6 +105,7 @@ attachWsServer({
   adminPasscode: process.env.ADMIN_PASSCODE,
   logHub,
   deepgramCostFlushIntervalMs: 5000,
+  viewerBacklogTranslateLimit,
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;

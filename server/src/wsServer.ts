@@ -17,6 +17,7 @@ import type { PromptConfigStore } from './promptConfigStore.js';
 import type { TranslationFlagDisplayStore } from './translationFlagDisplayStore.js';
 import { logEvent } from './logger.js';
 import type { LogHub } from './logHub.js';
+import { selectBacklogEntriesToTranslate } from './viewerBacklog.js';
 
 const PRECEDING_CONTEXT_LINES = 7;
 
@@ -67,6 +68,7 @@ export interface WsServerDeps {
   adminPasscode: string | undefined;
   logHub: LogHub;
   deepgramCostFlushIntervalMs: number;
+  viewerBacklogTranslateLimit: number;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
@@ -855,7 +857,11 @@ function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
 
           const backlog = deps.session.buffer.getRecent();
           const visibleEntries = backlog.filter((line) => !line.suppressed);
-          const missingEntries = visibleEntries.filter((line) => cache.get(language, line.id) === undefined);
+          const missingEntries = selectBacklogEntriesToTranslate(
+            visibleEntries,
+            (line) => cache.get(language, line.id) !== undefined,
+            deps.viewerBacklogTranslateLimit
+          );
 
           if (missingEntries.length > 0) {
             await ensureBacklogCached(deps, language, missingEntries);
