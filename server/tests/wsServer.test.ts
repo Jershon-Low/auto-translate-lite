@@ -187,6 +187,7 @@ describe('wsServer', () => {
       logHub,
       adminPasscode: 'test-passcode',
       deepgramCostFlushIntervalMs: 5000,
+      viewerBacklogTranslateLimit: 30,
     };
     attachWsServer(deps);
 
@@ -388,6 +389,51 @@ describe('wsServer', () => {
     expect(backlogVerifyCalls.length).toBeGreaterThan(0);
     const liveVerifyCalls = (geminiClient.models.generateContent as any).mock.calls.filter(isVerifyCall);
     expect(liveVerifyCalls).toHaveLength(0);
+
+    captureSocket.close();
+    viewerSocket.close();
+  });
+
+  it('caps backlog translation to the most recent viewerBacklogTranslateLimit lines', async () => {
+    // Override the default limit for this test; handleViewerConnection reads
+    // deps.viewerBacklogTranslateLimit at subscribe time, so mutating it here
+    // (same pattern as the deepgramCostFlushIntervalMs overrides) takes effect.
+    deps.viewerBacklogTranslateLimit = 2;
+
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket);
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+
+    session.buffer.append('Line 1', Date.now());
+    session.buffer.append('Line 2', Date.now());
+    session.buffer.append('Line 3', Date.now());
+    session.buffer.append('Line 4', Date.now());
+    session.buffer.append('Line 5', Date.now());
+
+    // Only the last 2 lines are sent for backlog translation, so the fill's
+    // translateBacklog call returns exactly two translations.
+    (geminiClient.models.generateContent as any).mockResolvedValueOnce({
+      text: '{"translations":["译文4","译文5"]}',
+    });
+
+    const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+    await waitForOpen(viewerSocket);
+    viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+    const backlogMessage = (await waitForMessage(viewerSocket)) as {
+      type: string;
+      lines: Array<{ id: string; english: string; translated: string }>;
+    };
+
+    expect(backlogMessage.type).toBe('backlog');
+    expect(backlogMessage.lines).toHaveLength(5);
+    // Older-than-cap lines are never translated: English shown as-is.
+    expect(backlogMessage.lines[0]).toEqual({ id: expect.any(String), english: 'Line 1', translated: 'Line 1' });
+    expect(backlogMessage.lines[1]).toEqual({ id: expect.any(String), english: 'Line 2', translated: 'Line 2' });
+    expect(backlogMessage.lines[2]).toEqual({ id: expect.any(String), english: 'Line 3', translated: 'Line 3' });
+    // The most recent `limit` lines are translated.
+    expect(backlogMessage.lines[3]).toEqual({ id: expect.any(String), english: 'Line 4', translated: '译文4' });
+    expect(backlogMessage.lines[4]).toEqual({ id: expect.any(String), english: 'Line 5', translated: '译文5' });
 
     captureSocket.close();
     viewerSocket.close();
