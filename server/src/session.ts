@@ -3,7 +3,7 @@ import { WebSocket } from 'ws';
 import { TranscriptBuffer } from './transcriptBuffer.js';
 import { TranslationCache } from './translationCache.js';
 import type { RoleCaches } from './sermonCache.js';
-import type { RoleProviders } from './llmTypes.js';
+import type { RoleProviders, BacklogProviders } from './llmTypes.js';
 import type { TranslationFlagDisplayMode } from './translationFlagDisplayStore.js';
 
 const EMPTY_ROLE_CACHES: RoleCaches = {
@@ -18,6 +18,7 @@ export class Session {
   buffer: TranscriptBuffer = new TranscriptBuffer();
   roleCaches: RoleCaches = { ...EMPTY_ROLE_CACHES };
   providers: RoleProviders | null = null;
+  backlogProviders: BacklogProviders | null = null;
   translationCache: TranslationCache = new TranslationCache();
   inFlightFills: Map<string, Promise<void>> = new Map();
   mode: 'automatic' | 'manual' = 'automatic';
@@ -34,6 +35,7 @@ export class Session {
     this.buffer.clear();
     this.roleCaches = { ...EMPTY_ROLE_CACHES };
     this.providers = null;
+    this.backlogProviders = null;
     this.translationCache = new TranslationCache();
     this.inFlightFills = new Map();
     this.translationFlagDisplayMode = 'hide';

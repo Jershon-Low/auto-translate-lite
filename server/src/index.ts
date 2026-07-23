@@ -16,8 +16,9 @@ import { createTranslationFlagDisplayStore } from './translationFlagDisplayStore
 import { createOpenRouterModelsStore } from './openRouterModelsStore.js';
 import { withCostTracking } from './geminiCostTracking.js';
 import { withGeminiLimiter } from './geminiRateLimiting.js';
-import { GeminiCallLimiter } from './geminiLimiter.js';
+import { GeminiCallLimiter, type CallPriority } from './geminiLimiter.js';
 import { createOpenRouterClient } from './openRouterClient.js';
+import type { OpenRouterClient } from './openRouterClient.js';
 import { withOpenRouterCostTracking } from './openRouterCostTracking.js';
 import { withOpenRouterLimiter } from './openRouterLimiter.js';
 import { OpenRouterRateLimiter } from './openRouterRateLimiter.js';
@@ -37,23 +38,29 @@ const geminiClient = withCostTracking(
   withGeminiLimiter(createGeminiClient(process.env.GEMINI_API_KEY!), geminiLimiter),
   costTracker
 );
-const openRouterLimiter = new GeminiCallLimiter();
+const openRouterLimiter = new GeminiCallLimiter(
+  process.env.OPENROUTER_MAX_CONCURRENT ? Number(process.env.OPENROUTER_MAX_CONCURRENT) : 8,
+  process.env.OPENROUTER_BACKLOG_MAX_CONCURRENT ? Number(process.env.OPENROUTER_BACKLOG_MAX_CONCURRENT) : 2
+);
 const openRouterRateLimiter = new OpenRouterRateLimiter(
   process.env.OPENROUTER_MAX_CALLS_PER_WINDOW ? Number(process.env.OPENROUTER_MAX_CALLS_PER_WINDOW) : 5,
-  process.env.OPENROUTER_RATE_WINDOW_MS ? Number(process.env.OPENROUTER_RATE_WINDOW_MS) : 2000
+  process.env.OPENROUTER_RATE_WINDOW_MS ? Number(process.env.OPENROUTER_RATE_WINDOW_MS) : 2000,
+  process.env.OPENROUTER_BACKLOG_MAX_CALLS_PER_WINDOW ? Number(process.env.OPENROUTER_BACKLOG_MAX_CALLS_PER_WINDOW) : 1
 );
-const openRouterClient = process.env.OPENROUTER_API_KEY
-  ? withOpenRouterReasoningLogging(
-      withOpenRouterCostTracking(
-        withOpenRouterLimiter(
-          createOpenRouterClient(process.env.OPENROUTER_API_KEY),
-          openRouterLimiter,
-          openRouterRateLimiter
-        ),
-        costTracker
-      )
-    )
+const openRouterBaseClient = process.env.OPENROUTER_API_KEY
+  ? createOpenRouterClient(process.env.OPENROUTER_API_KEY)
   : null;
+function buildOpenRouterClient(priority: CallPriority): OpenRouterClient | null {
+  if (!openRouterBaseClient) return null;
+  return withOpenRouterReasoningLogging(
+    withOpenRouterCostTracking(
+      withOpenRouterLimiter(openRouterBaseClient, openRouterLimiter, openRouterRateLimiter, priority),
+      costTracker
+    )
+  );
+}
+const openRouterClient = buildOpenRouterClient('live');
+const openRouterClientBacklog = buildOpenRouterClient('backlog');
 const sermonDocStore = createSermonDocStore();
 const feedbackStore = createFeedbackStore(process.env.FEEDBACK_FILE_PATH ?? 'data/feedback.txt');
 const viewerFeedbackStore = createViewerFeedbackStore(
@@ -86,6 +93,7 @@ attachWsServer({
   session,
   geminiClient,
   llmClients: { gemini: geminiClient, openRouter: openRouterClient },
+  backlogLlmClients: { gemini: geminiClient, openRouter: openRouterClientBacklog },
   deepgramApiKey: process.env.DEEPGRAM_API_KEY!,
   createDeepgramConnection,
   sermonDocStore,

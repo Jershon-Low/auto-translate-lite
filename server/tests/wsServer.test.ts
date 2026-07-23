@@ -171,6 +171,7 @@ describe('wsServer', () => {
       session,
       geminiClient,
       llmClients: { gemini: geminiClient, openRouter: null },
+      backlogLlmClients: { gemini: geminiClient, openRouter: null },
       deepgramApiKey: 'fake-key',
       createDeepgramConnection: (_apiKey, callbacks) => {
         capturedCallbacks = callbacks;
@@ -346,6 +347,39 @@ describe('wsServer', () => {
       type: 'backlog',
       lines: [{ id: expect.any(String), english: 'Earlier line', translated: '较早的一行' }],
     });
+
+    captureSocket.close();
+    viewerSocket.close();
+  });
+
+  it('routes the on-subscribe backlog fill through backlogProviders, not the live providers', async () => {
+    // A distinct Gemini client stands in for the backlog budget lane. In prod
+    // both bundles share one Gemini client (OpenRouter-only isolation); here we
+    // split them so we can assert *which* client the backlog fill used.
+    const backlogGeminiClient = fakeGeminiClient({ translate: '{"translations":["B1","B2","B3"]}' });
+    deps.backlogLlmClients = { gemini: backlogGeminiClient, openRouter: null };
+
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket);
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+
+    session.buffer.append('Line 1', Date.now());
+    session.buffer.append('Line 2', Date.now());
+    session.buffer.append('Line 3', Date.now());
+
+    const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+    await waitForOpen(viewerSocket);
+    viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+    const backlogMessage = (await waitForMessage(viewerSocket)) as { type: string };
+    expect(backlogMessage.type).toBe('backlog');
+
+    // The backlog translate ran on the backlog client...
+    const backlogTranslateCalls = (backlogGeminiClient.models.generateContent as any).mock.calls.filter(isTranslateCall);
+    expect(backlogTranslateCalls.length).toBeGreaterThan(0);
+    // ...and NOT on the live client (no live segments were fed in this test).
+    const liveTranslateCalls = (geminiClient.models.generateContent as any).mock.calls.filter(isTranslateCall);
+    expect(liveTranslateCalls).toHaveLength(0);
 
     captureSocket.close();
     viewerSocket.close();

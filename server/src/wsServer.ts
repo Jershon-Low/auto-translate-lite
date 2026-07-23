@@ -9,6 +9,7 @@ import type { DeepgramConnection, DeepgramConnectionFactory } from './deepgram.j
 import { createRoleCaches, deleteRoleCaches } from './sermonCache.js';
 import { getProvider } from './llmRegistry.js';
 import type { LlmClients } from './llmRegistry.js';
+import type { LlmProvider } from './llmTypes.js';
 import type { SermonDocStore } from './sermonDocStore.js';
 import type { FeedbackStore } from './feedbackStore.js';
 import type { CostTracker } from './costTracker.js';
@@ -56,6 +57,7 @@ export interface WsServerDeps {
   session: Session;
   geminiClient: GeminiClient;
   llmClients: LlmClients;
+  backlogLlmClients: LlmClients;
   deepgramApiKey: string;
   createDeepgramConnection: DeepgramConnectionFactory;
   sermonDocStore: SermonDocStore;
@@ -227,6 +229,10 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
               transcriptionVerifier: getProvider(modelConfig.transcriptionVerifier, promptConfig.transcriptionVerifier, deps.llmClients),
               translation: getProvider(modelConfig.translation, promptConfig.translation, deps.llmClients),
               translationVerifier: getProvider(modelConfig.translationVerifier, promptConfig.translationVerifier, deps.llmClients),
+            };
+            deps.session.backlogProviders = {
+              translation: getProvider(modelConfig.translation, promptConfig.translation, deps.backlogLlmClients),
+              translationVerifier: getProvider(modelConfig.translationVerifier, promptConfig.translationVerifier, deps.backlogLlmClients),
             };
             deps.session.roleCaches = await createRoleCaches(deps.geminiClient, modelConfig, promptConfig, feedbackText, sermonText);
             deps.session.translationFlagDisplayMode = translationFlagDisplayConfig.mode;
@@ -735,10 +741,10 @@ async function verifyTranscriptionWithRetry(
 
 async function verifyTranslationsWithRetry(
   deps: WsServerDeps,
-  items: VerificationItem[]
+  items: VerificationItem[],
+  provider: LlmProvider = deps.session.providers!.translationVerifier
 ): Promise<Record<string, VerificationResult>> {
   if (items.length === 0) return {};
-  const provider = deps.session.providers!.translationVerifier;
   const cacheRef = deps.session.roleCaches.translationVerifier;
   try {
     return await provider.verifyTranslations(items, cacheRef);
@@ -777,7 +783,7 @@ async function ensureBacklogCached(
   const fillPromise = (async () => {
     let translations: string[];
     try {
-      translations = await deps.session.providers!.translation.translateBacklog(
+      translations = await deps.session.backlogProviders!.translation.translateBacklog(
         missingEntries.map((line) => line.english),
         language,
         deps.session.roleCaches.translation
@@ -797,7 +803,11 @@ async function ensureBacklogCached(
     const verificationItems: VerificationItem[] = missingEntries
       .map((line, index) => ({ id: line.id, english: line.english, translated: translations[index] ?? '' }))
       .filter((item) => item.translated.length > 0);
-    const verifications = await verifyTranslationsWithRetry(deps, verificationItems);
+    const verifications = await verifyTranslationsWithRetry(
+      deps,
+      verificationItems,
+      deps.session.backlogProviders!.translationVerifier
+    );
 
     const flagMode = deps.session.translationFlagDisplayMode === 'flag';
     missingEntries.forEach((line, index) => {

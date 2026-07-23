@@ -36,3 +36,8 @@ export interface RoleProviders {
   translation: LlmProvider;
   translationVerifier: LlmProvider;
 }
+
+export interface BacklogProviders {
+  translation: LlmProvider;
+  translationVerifier: LlmProvider;
+}
