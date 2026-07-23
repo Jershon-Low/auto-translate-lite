@@ -103,4 +103,110 @@ describe('GeminiCallLimiter', () => {
     deferredCalls.forEach((entry, index) => entry.resolve(index));
     await Promise.all(runs);
   });
+
+  it('caps concurrent backlog calls at backlogMaxConcurrent', async () => {
+    const limiter = new GeminiCallLimiter(3, 1);
+    const calls = [deferred<string>(), deferred<string>(), deferred<string>()];
+    const started = [false, false, false];
+
+    const runs = calls.map((entry, index) =>
+      limiter.run(() => {
+        started[index] = true;
+        return entry.promise;
+      }, 'backlog')
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(started).toEqual([true, false, false]); // only 1 backlog runs at a time
+
+    calls[0].resolve('a');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(started).toEqual([true, true, false]); // freed slot admits the next backlog
+
+    calls[1].resolve('b');
+    calls[2].resolve('c');
+    await Promise.all(runs);
+  });
+
+  it('admits a queued live call ahead of a queued backlog call', async () => {
+    const limiter = new GeminiCallLimiter(1, 1);
+    const first = deferred<string>();
+    const queuedLive = deferred<string>();
+    let liveStarted = false;
+    let backlogStarted = false;
+
+    const runFirst = limiter.run(() => first.promise, 'live'); // occupies the only slot
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const runBacklog = limiter.run(() => {
+      backlogStarted = true;
+      return Promise.resolve('b');
+    }, 'backlog');
+    const runLive = limiter.run(() => {
+      liveStarted = true;
+      return queuedLive.promise;
+    }, 'live');
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect([liveStarted, backlogStarted]).toEqual([false, false]);
+
+    first.resolve('x');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(liveStarted).toBe(true); // live jumps ahead of the queued backlog
+    expect(backlogStarted).toBe(false); // slot now held by the queued live call
+
+    queuedLive.resolve('y');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(backlogStarted).toBe(true); // backlog runs once a slot frees
+
+    await Promise.all([runFirst, runLive, runBacklog]);
+  });
+
+  it('does not starve live: reserves maxConcurrent - backlogMaxConcurrent slots for live', async () => {
+    const limiter = new GeminiCallLimiter(3, 1);
+    const backlog = deferred<string>();
+    const runBacklog = limiter.run(() => backlog.promise, 'backlog'); // holds 1 slot
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const live = [deferred<string>(), deferred<string>(), deferred<string>()];
+    const started = [false, false, false];
+    const liveRuns = live.map((entry, index) =>
+      limiter.run(() => {
+        started[index] = true;
+        return entry.promise;
+      }, 'live')
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(started).toEqual([true, true, false]); // 2 live run alongside 1 backlog (active = 3 = max)
+
+    backlog.resolve('b');
+    live.forEach((entry, index) => entry.resolve(String(index)));
+    await Promise.all([runBacklog, ...liveRuns]);
+  });
+
+  it('leaves backlog unrestricted when no backlog cap is given (backward compatible)', async () => {
+    const limiter = new GeminiCallLimiter(2); // backlogMaxConcurrent defaults to 2
+    const first = deferred<string>();
+    const second = deferred<string>();
+    let firstStarted = false;
+    let secondStarted = false;
+
+    const firstRun = limiter.run(() => {
+      firstStarted = true;
+      return first.promise;
+    }, 'backlog');
+    const secondRun = limiter.run(() => {
+      secondStarted = true;
+      return second.promise;
+    }, 'backlog');
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(firstStarted).toBe(true);
+    expect(secondStarted).toBe(true); // both backlog calls run: cap == maxConcurrent == 2
+
+    first.resolve('a');
+    second.resolve('b');
+    await Promise.all([firstRun, secondRun]);
+  });
 });
