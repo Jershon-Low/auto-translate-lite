@@ -149,4 +149,28 @@ describe('OpenRouterRateLimiter', () => {
 
     await Promise.all(runs);
   });
+
+  it('reschedules its timer so a queued live call runs as soon as a live slot frees, not behind a later backlog wake', async () => {
+    const limiter = new OpenRouterRateLimiter(5, 2000, 1);
+    const started = { live4: false };
+
+    limiter.run(async () => {}, 'live'); // fills 1 slot at t=0
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(1900); // clock -> ~1900
+    limiter.run(async () => {}, 'backlog'); // admitted
+    limiter.run(async () => {}, 'backlog'); // queued: blocks on sub-cap, arms timer for ~t=3900
+
+    limiter.run(async () => {}, 'live'); // fills window
+    limiter.run(async () => {}, 'live');
+    limiter.run(async () => {}, 'live');
+    limiter.run(async () => {
+      started.live4 = true;
+    }, 'live'); // queued: its slot frees at t=2000
+    await vi.advanceTimersByTimeAsync(0);
+    expect(started.live4).toBe(false); // window full, correctly queued
+
+    await vi.advanceTimersByTimeAsync(150); // clock -> ~2050, past the t=2000 slot-free
+    expect(started.live4).toBe(true); // must have run; with the bug it waits until ~3900
+  });
 });

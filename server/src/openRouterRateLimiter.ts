@@ -50,14 +50,24 @@ export class OpenRouterRateLimiter {
       this.backlogQueue.shift()!();
     }
 
-    if (this.timer === null) {
-      const waitMs = this.nextWaitMs(now);
-      if (waitMs !== null) {
-        this.timer = setTimeout(() => {
-          this.timer = null;
-          this.drain();
-        }, waitMs);
-      }
+    this.scheduleTimer(now);
+  }
+
+  // Recomputes the soonest wake time and rearms the timer accordingly. Always
+  // clears any pending timer first: the soonest-needed wake can move earlier
+  // than an already-armed deadline (e.g. a live slot freeing before a later
+  // backlog sub-window expiry), so we can't just leave an existing timer alone.
+  private scheduleTimer(now: number): void {
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    const waitMs = this.nextWaitMs(now);
+    if (waitMs !== null) {
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        this.drain();
+      }, waitMs);
     }
   }
 
