@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { withOpenRouterLimiter } from '../src/openRouterLimiter';
 import { GeminiCallLimiter } from '../src/geminiLimiter';
+import { OpenRouterRateLimiter } from '../src/openRouterRateLimiter';
 import type { OpenRouterClient } from '../src/openRouterClient';
 
 function fakeClient(): OpenRouterClient {
@@ -56,5 +57,41 @@ describe('withOpenRouterLimiter', () => {
     );
 
     expect(maxConcurrent).toBeLessThanOrEqual(2);
+  });
+
+  it('threads an explicit backlog priority into both limiters', async () => {
+    const client = fakeClient();
+    const limiter = new GeminiCallLimiter(1);
+    const rateLimiter = new OpenRouterRateLimiter(5, 2000);
+    const limiterSpy = vi.spyOn(limiter, 'run');
+    const rateSpy = vi.spyOn(rateLimiter, 'run');
+    const wrapped = withOpenRouterLimiter(client, limiter, rateLimiter, 'backlog');
+
+    await wrapped.chat.completions.create({
+      model: 'qwen/qwen3.6-flash',
+      messages: [{ role: 'user', content: 'hi' }],
+      response_format: { type: 'json_object' },
+    });
+
+    expect(limiterSpy).toHaveBeenCalledWith(expect.any(Function), 'backlog');
+    expect(rateSpy).toHaveBeenCalledWith(expect.any(Function), 'backlog');
+  });
+
+  it('defaults to live priority when none is given', async () => {
+    const client = fakeClient();
+    const limiter = new GeminiCallLimiter(1);
+    const rateLimiter = new OpenRouterRateLimiter(5, 2000);
+    const limiterSpy = vi.spyOn(limiter, 'run');
+    const rateSpy = vi.spyOn(rateLimiter, 'run');
+    const wrapped = withOpenRouterLimiter(client, limiter, rateLimiter);
+
+    await wrapped.chat.completions.create({
+      model: 'qwen/qwen3.6-flash',
+      messages: [{ role: 'user', content: 'hi' }],
+      response_format: { type: 'json_object' },
+    });
+
+    expect(limiterSpy).toHaveBeenCalledWith(expect.any(Function), 'live');
+    expect(rateSpy).toHaveBeenCalledWith(expect.any(Function), 'live');
   });
 });
