@@ -1,27 +1,31 @@
-// Smooths bursts of OpenRouter calls (e.g. several viewers switching to a new
-// language at once, each triggering a backlog-translate + verify call, on top
-// of the ongoing live per-segment translation) into a steady rate, so a burst
-// doesn't trip OpenRouter's own per-minute rate limit. This is independent of
-// GeminiCallLimiter, which only caps concurrency — it does not pace requests
-// over time, and is shared with the unrelated Gemini call path.
+import type { CallPriority } from './geminiLimiter.js';
+
+// Smooths bursts of OpenRouter calls into a steady rate so a burst doesn't trip
+// OpenRouter's per-minute rate limit. Backlog calls get a lower-priority share:
+// they are capped at backlogMaxPerWindow per window and are admitted only after
+// live callers, so live captions are never delayed behind on-subscribe backlog
+// fills. This is independent of GeminiCallLimiter, which caps concurrency.
 export class OpenRouterRateLimiter {
-  private readonly startTimes: number[] = [];
-  private readonly queue: Array<() => void> = [];
+  private readonly startTimes: number[] = []; // all starts in the current window
+  private readonly backlogStartTimes: number[] = []; // backlog-only starts in the current window
+  private readonly liveQueue: Array<() => void> = [];
+  private readonly backlogQueue: Array<() => void> = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly maxPerWindow: number = 5,
-    private readonly windowMs: number = 2000
+    private readonly windowMs: number = 2000,
+    private readonly backlogMaxPerWindow: number = maxPerWindow
   ) {}
 
-  async run<T>(fn: () => Promise<T>): Promise<T> {
-    await this.acquire();
+  async run<T>(fn: () => Promise<T>, priority: CallPriority = 'live'): Promise<T> {
+    await this.acquire(priority);
     return fn();
   }
 
-  private acquire(): Promise<void> {
+  private acquire(priority: CallPriority): Promise<void> {
     return new Promise((resolve) => {
-      this.queue.push(resolve);
+      (priority === 'backlog' ? this.backlogQueue : this.liveQueue).push(resolve);
       this.drain();
     });
   }
@@ -29,24 +33,59 @@ export class OpenRouterRateLimiter {
   private drain(): void {
     const now = Date.now();
     this.prune(now);
-    while (this.queue.length > 0 && this.startTimes.length < this.maxPerWindow) {
+
+    // Live first (priority).
+    while (this.liveQueue.length > 0 && this.startTimes.length < this.maxPerWindow) {
       this.startTimes.push(now);
-      const resolve = this.queue.shift()!;
-      resolve();
+      this.liveQueue.shift()!();
     }
-    if (this.queue.length > 0 && this.timer === null) {
-      const oldest = this.startTimes[0];
-      const waitMs = Math.max(0, this.windowMs - (now - oldest)) + 1;
-      this.timer = setTimeout(() => {
-        this.timer = null;
-        this.drain();
-      }, waitMs);
+    // Then backlog, bounded by both the total window cap and the backlog sub-cap.
+    while (
+      this.backlogQueue.length > 0 &&
+      this.startTimes.length < this.maxPerWindow &&
+      this.backlogStartTimes.length < this.backlogMaxPerWindow
+    ) {
+      this.startTimes.push(now);
+      this.backlogStartTimes.push(now);
+      this.backlogQueue.shift()!();
     }
+
+    if (this.timer === null) {
+      const waitMs = this.nextWaitMs(now);
+      if (waitMs !== null) {
+        this.timer = setTimeout(() => {
+          this.timer = null;
+          this.drain();
+        }, waitMs);
+      }
+    }
+  }
+
+  // Soonest delay (ms) at which a still-blocked waiter could become admissible,
+  // or null if nothing is waiting. Wakes and re-evaluates; on wake the drain
+  // reschedules if still blocked, so progress is always made.
+  private nextWaitMs(now: number): number | null {
+    const mainFull = this.startTimes.length >= this.maxPerWindow;
+    const candidates: number[] = [];
+    if (this.liveQueue.length > 0 && mainFull) {
+      candidates.push(this.windowMs - (now - this.startTimes[0]));
+    }
+    if (this.backlogQueue.length > 0) {
+      if (mainFull) candidates.push(this.windowMs - (now - this.startTimes[0]));
+      if (this.backlogStartTimes.length >= this.backlogMaxPerWindow && this.backlogStartTimes.length > 0) {
+        candidates.push(this.windowMs - (now - this.backlogStartTimes[0]));
+      }
+    }
+    if (candidates.length === 0) return null;
+    return Math.max(0, Math.min(...candidates)) + 1;
   }
 
   private prune(now: number): void {
     while (this.startTimes.length > 0 && now - this.startTimes[0] >= this.windowMs) {
       this.startTimes.shift();
+    }
+    while (this.backlogStartTimes.length > 0 && now - this.backlogStartTimes[0] >= this.windowMs) {
+      this.backlogStartTimes.shift();
     }
   }
 }
