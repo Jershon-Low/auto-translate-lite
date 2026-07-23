@@ -225,15 +225,18 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
             const promptConfig = await deps.promptConfigStore.read();
             const translationFlagDisplayConfig = await deps.translationFlagDisplayStore.read();
 
+            // The two translation roles are built identically for the live and
+            // backlog lanes — only the client bundle (and thus the OpenRouter
+            // budget) differs — so share one builder.
+            const buildTranslationProviders = (clients: LlmClients) => ({
+              translation: getProvider(modelConfig.translation, promptConfig.translation, clients),
+              translationVerifier: getProvider(modelConfig.translationVerifier, promptConfig.translationVerifier, clients),
+            });
             deps.session.providers = {
               transcriptionVerifier: getProvider(modelConfig.transcriptionVerifier, promptConfig.transcriptionVerifier, deps.llmClients),
-              translation: getProvider(modelConfig.translation, promptConfig.translation, deps.llmClients),
-              translationVerifier: getProvider(modelConfig.translationVerifier, promptConfig.translationVerifier, deps.llmClients),
+              ...buildTranslationProviders(deps.llmClients),
             };
-            deps.session.backlogProviders = {
-              translation: getProvider(modelConfig.translation, promptConfig.translation, deps.backlogLlmClients),
-              translationVerifier: getProvider(modelConfig.translationVerifier, promptConfig.translationVerifier, deps.backlogLlmClients),
-            };
+            deps.session.backlogProviders = buildTranslationProviders(deps.backlogLlmClients);
             deps.session.roleCaches = await createRoleCaches(deps.geminiClient, modelConfig, promptConfig, feedbackText, sermonText);
             deps.session.translationFlagDisplayMode = translationFlagDisplayConfig.mode;
 

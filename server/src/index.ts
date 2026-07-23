@@ -38,14 +38,25 @@ const geminiClient = withCostTracking(
   withGeminiLimiter(createGeminiClient(process.env.GEMINI_API_KEY!), geminiLimiter),
   costTracker
 );
+// Parse a positive-integer env override, falling back to `fallback` when the
+// var is unset, non-numeric (NaN), or below `min`. Without the NaN guard a typo
+// like OPENROUTER_MAX_CONCURRENT=eight would make `active < NaN` always false and
+// silently deadlock the OpenRouter path; a 0 backlog sub-cap would hang the
+// backlog fill. min defaults to 1 so every knob stays in a safe range.
+function envInt(name: string, fallback: number, min = 1): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= min ? Math.floor(value) : fallback;
+}
 const openRouterLimiter = new GeminiCallLimiter(
-  process.env.OPENROUTER_MAX_CONCURRENT ? Number(process.env.OPENROUTER_MAX_CONCURRENT) : 8,
-  process.env.OPENROUTER_BACKLOG_MAX_CONCURRENT ? Number(process.env.OPENROUTER_BACKLOG_MAX_CONCURRENT) : 2
+  envInt('OPENROUTER_MAX_CONCURRENT', 8),
+  envInt('OPENROUTER_BACKLOG_MAX_CONCURRENT', 2)
 );
 const openRouterRateLimiter = new OpenRouterRateLimiter(
-  process.env.OPENROUTER_MAX_CALLS_PER_WINDOW ? Number(process.env.OPENROUTER_MAX_CALLS_PER_WINDOW) : 5,
-  process.env.OPENROUTER_RATE_WINDOW_MS ? Number(process.env.OPENROUTER_RATE_WINDOW_MS) : 2000,
-  process.env.OPENROUTER_BACKLOG_MAX_CALLS_PER_WINDOW ? Number(process.env.OPENROUTER_BACKLOG_MAX_CALLS_PER_WINDOW) : 1
+  envInt('OPENROUTER_MAX_CALLS_PER_WINDOW', 5),
+  envInt('OPENROUTER_RATE_WINDOW_MS', 2000),
+  envInt('OPENROUTER_BACKLOG_MAX_CALLS_PER_WINDOW', 1)
 );
 const openRouterBaseClient = process.env.OPENROUTER_API_KEY
   ? createOpenRouterClient(process.env.OPENROUTER_API_KEY)

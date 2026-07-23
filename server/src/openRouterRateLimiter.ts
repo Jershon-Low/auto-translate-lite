@@ -77,11 +77,13 @@ export class OpenRouterRateLimiter {
   private nextWaitMs(now: number): number | null {
     const mainFull = this.startTimes.length >= this.maxPerWindow;
     const candidates: number[] = [];
+    // Only meaningful when mainFull (which implies startTimes is non-empty).
+    const mainWindowDelay = this.windowMs - (now - this.startTimes[0]);
     if (this.liveQueue.length > 0 && mainFull) {
-      candidates.push(this.windowMs - (now - this.startTimes[0]));
+      candidates.push(mainWindowDelay);
     }
     if (this.backlogQueue.length > 0) {
-      if (mainFull) candidates.push(this.windowMs - (now - this.startTimes[0]));
+      if (mainFull) candidates.push(mainWindowDelay);
       if (this.backlogStartTimes.length >= this.backlogMaxPerWindow && this.backlogStartTimes.length > 0) {
         candidates.push(this.windowMs - (now - this.backlogStartTimes[0]));
       }

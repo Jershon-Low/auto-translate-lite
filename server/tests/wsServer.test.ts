@@ -381,6 +381,14 @@ describe('wsServer', () => {
     const liveTranslateCalls = (geminiClient.models.generateContent as any).mock.calls.filter(isTranslateCall);
     expect(liveTranslateCalls).toHaveLength(0);
 
+    // The backlog verification (safety checker) is likewise isolated: it runs on
+    // the backlog client, never the live one.
+    const isVerifyCall = (call: any) => (call[0].contents as string).includes('safety checker');
+    const backlogVerifyCalls = (backlogGeminiClient.models.generateContent as any).mock.calls.filter(isVerifyCall);
+    expect(backlogVerifyCalls.length).toBeGreaterThan(0);
+    const liveVerifyCalls = (geminiClient.models.generateContent as any).mock.calls.filter(isVerifyCall);
+    expect(liveVerifyCalls).toHaveLength(0);
+
     captureSocket.close();
     viewerSocket.close();
   });
