@@ -83,6 +83,7 @@ export interface WsServerDeps {
   deepgramCostFlushIntervalMs: number;
   viewerBacklogTranslateLimit: number;
   maxPublishLagMs: number;
+  maxCorrectionLagMs: number;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
@@ -131,6 +132,15 @@ interface Publisher {
 
 const DEADLINE_REACHED = Symbol('deadline-reached');
 
+// What raceAgainstDeadline decided, not just what it produced. `shedAt` is the
+// moment the deadline fired (and therefore the clock the correction window is
+// measured from), or null when the translation won the race and no correction
+// is owed.
+interface DeadlineOutcome {
+  results: PreparedLanguageResult[] | null;
+  shedAt: number | null;
+}
+
 // Publish the line's already-verified English text for every active language.
 // Mirrors prepareTranslationsForPublish's guards so a line suppressed
 // (admin-removed) mid-flight is still never published. English is always safe:
@@ -151,7 +161,7 @@ async function raceAgainstDeadline(
   deadlineMs: number,
   line: CaptionLine,
   deps: WsServerDeps
-): Promise<PreparedLanguageResult[] | null> {
+): Promise<DeadlineOutcome> {
   // Attach a handler immediately so a rejection is never left unhandled,
   // regardless of which branch below runs (the early-return path never
   // otherwise touches preparedPromise).
@@ -160,7 +170,7 @@ async function raceAgainstDeadline(
   const remaining = deadlineMs - Date.now();
   if (remaining <= 0) {
     void logEvent('warn', { event: 'caption_lag_shed', reason: 'publish_deadline', english: line.english });
-    return englishFallbackResults(line, deps);
+    return { results: englishFallbackResults(line, deps), shedAt: Date.now() };
   }
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<typeof DEADLINE_REACHED>((resolve) => {
@@ -170,9 +180,9 @@ async function raceAgainstDeadline(
     const outcome = await Promise.race([preparedPromise, timeout]);
     if (outcome === DEADLINE_REACHED) {
       void logEvent('warn', { event: 'caption_lag_shed', reason: 'publish_deadline', english: line.english });
-      return englishFallbackResults(line, deps);
+      return { results: englishFallbackResults(line, deps), shedAt: Date.now() };
     }
-    return outcome;
+    return { results: outcome, shedAt: null };
   } finally {
     clearTimeout(timer!);
   }
@@ -220,28 +230,33 @@ function createEnqueuePublish(deps: WsServerDeps): Publisher {
   function enqueueOrderedSend(
     line: CaptionLine,
     enqueuedAt: number,
-    resultsPromise: Promise<PreparedLanguageResult[] | null>,
+    outcomePromise: Promise<DeadlineOutcome>,
     viewerMessageType: 'caption' | 'caption-inserted'
-  ): void {
+  ): Promise<void> {
     const tracker = deps.session.liveLag;
     tracker.enqueue(enqueuedAt);
-    deps.session.publishQueue = deps.session.publishQueue.then(async () => {
-      let results: PreparedLanguageResult[] | null;
+    const sendPromise = deps.session.publishQueue.then(async () => {
+      let outcome: DeadlineOutcome;
       try {
-        results = await resultsPromise;
+        outcome = await outcomePromise;
       } catch (error) {
         void logEvent('error', {
           event: 'publish_failed',
           english: line.english,
           error: error instanceof Error ? error.message : String(error),
         });
-        results = null;
+        outcome = { results: null, shedAt: null };
       } finally {
         tracker.dequeue();
       }
-      sendPrepared(line, results, deps, viewerMessageType);
+      // Tell the viewer a correction may follow only when one is actually owed:
+      // the line was shed at the deadline AND corrections are enabled.
+      const awaitingCorrection = outcome.shedAt !== null && deps.maxCorrectionLagMs > 0;
+      sendPrepared(line, outcome.results, deps, viewerMessageType, awaitingCorrection);
       reportLag(deps, deps.session.liveLag.lagMs(Date.now()));
     });
+    deps.session.publishQueue = sendPromise;
+    return sendPromise;
   }
 
   const enqueuePublish: EnqueuePublish = (line, workPromise, viewerMessageType = 'caption') => {
@@ -250,12 +265,40 @@ function createEnqueuePublish(deps: WsServerDeps): Publisher {
     const preparedPromise = workPromise.then((translations) =>
       prepareTranslationsForPublish(line, translations, deps)
     );
-    const resultsPromise = raceAgainstDeadline(preparedPromise, enqueuedAt + deps.maxPublishLagMs, line, deps);
-    enqueueOrderedSend(line, enqueuedAt, resultsPromise, viewerMessageType);
+    const outcomePromise = raceAgainstDeadline(preparedPromise, enqueuedAt + deps.maxPublishLagMs, line, deps);
+    const sendPromise = enqueueOrderedSend(line, enqueuedAt, outcomePromise, viewerMessageType);
+
+    if (deps.maxCorrectionLagMs > 0) {
+      // .catch is required, not optional: outcomePromise rejects when
+      // preparedPromise rejects before the deadline, and this is a second
+      // subscription to it — without the catch that rejection is unhandled on
+      // this branch even though enqueueOrderedSend handles its own.
+      void outcomePromise
+        .then((outcome) => {
+          if (outcome.shedAt === null) return;
+          // outcome.results is exactly what sendPrepared marked as
+          // awaitingCorrection (englishFallbackResults' language set at shed
+          // time) — snapshot it now rather than re-deriving the language set
+          // later from the late translation results, which can cover a
+          // different set of languages (see sendCorrection). When results is
+          // null the line was already suppressed at shed time, so
+          // sendPrepared sent nothing and marked no one: there is nothing to
+          // correct.
+          if (outcome.results === null) return;
+          const markedLanguages = outcome.results.map((result) => result.language);
+          scheduleCorrection(deps, line, preparedPromise, outcome.shedAt, sendPromise, markedLanguages, line.english);
+        })
+        .catch(() => {});
+    }
   };
 
   const publishEnglish = (line: CaptionLine, viewerMessageType: 'caption' | 'caption-inserted' = 'caption'): void => {
-    enqueueOrderedSend(line, Date.now(), Promise.resolve(englishFallbackResults(line, deps)), viewerMessageType);
+    enqueueOrderedSend(
+      line,
+      Date.now(),
+      Promise.resolve({ results: englishFallbackResults(line, deps), shedAt: null }),
+      viewerMessageType
+    );
   };
 
   return { enqueuePublish, publishEnglish };
@@ -632,7 +675,8 @@ function sendPrepared(
   line: CaptionLine,
   results: PreparedLanguageResult[] | null,
   deps: WsServerDeps,
-  viewerMessageType: 'caption' | 'caption-inserted'
+  viewerMessageType: 'caption' | 'caption-inserted',
+  awaitingCorrection = false
 ): void {
   if (results === null) return;
 
@@ -649,11 +693,253 @@ function sendPrepared(
       english: line.english,
       translated,
       ...(flagged ? { flagged: true, reason } : {}),
+      ...(awaitingCorrection ? { awaitingCorrection: true } : {}),
     });
     for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
       viewerSocket.send(payload);
     }
   }
+}
+
+// Writes the retained per-language translations into the cache, independent
+// of whether the correction window is still open — a viewer who joins,
+// reconnects, or switches language later should get the real translation from
+// their backlog even after the live window has lapsed. Shared by
+// sendCorrection's on-time path and scheduleCorrection's timed-out-but-
+// eventually-arrived path below.
+function cacheCorrectedTranslations(deps: WsServerDeps, line: CaptionLine, results: PreparedLanguageResult[]): void {
+  for (const result of results) {
+    deps.session.translationCache.set(
+      result.language,
+      line.id,
+      result.flagged
+        ? { translated: result.translated, flagged: true, reason: result.reason! }
+        : { translated: result.translated, flagged: false }
+    );
+  }
+}
+
+// Delivers the single terminal message a deadline-shed line is owed. The cache
+// is written regardless of the correction window — a viewer who joins,
+// reconnects, or switches language later should get the real translation from
+// their backlog — while the window governs only whether text is rewritten on a
+// screen someone is currently reading. A message with no `translated` means
+// "settle": clear the waiting state, leave the text alone.
+//
+// Iterates `markedLanguages` — the shed-time snapshot of exactly which
+// languages were told `awaitingCorrection: true` — rather than re-deriving
+// the set from the late `results`. Those two sets can differ: a viewer may
+// join a new language during the deadline window (marked but absent from
+// results, which only cover languages active at ingest), or the translation
+// can fail outright (`results === []`, which is truthy but empty). Iterating
+// the late results directly would strand the former and message nobody for
+// the latter — every marked viewer is owed a terminal message regardless of
+// what the late results contain.
+// Returns whether at least one marked viewer actually received an upgrade —
+// the caller logs this instead of re-deriving it from `results` so the
+// caption_corrected log agrees with the wire by construction. Re-deriving it
+// from `results.some(...)` over *all* late results (rather than this loop's
+// `markedLanguages`) can disagree: if a language left and rejoined between
+// shed and prepare, `results` may contain an upgrade for it while this loop
+// never sends to it, or vice versa.
+function sendCorrection(
+  deps: WsServerDeps,
+  line: CaptionLine,
+  results: PreparedLanguageResult[] | null,
+  withinWindow: boolean,
+  markedLanguages: string[]
+): boolean {
+  if (results) cacheCorrectedTranslations(deps, line, results);
+
+  let hasUpgrade = false;
+  for (const language of markedLanguages) {
+    const result = results?.find((entry) => entry.language === language);
+
+    // Only rewrite the viewer's text when there is genuinely something new to
+    // show. A verification failure makes prepareTranslationsForPublish fall
+    // back to the English we already published, which is a settle, not an
+    // upgrade.
+    const isUpgrade = result !== undefined && withinWindow && result.translated !== line.english;
+    if (isUpgrade) hasUpgrade = true;
+    const payload = JSON.stringify({
+      type: 'caption-corrected',
+      id: line.id,
+      ...(isUpgrade
+        ? {
+            translated: result.translated,
+            ...(result.flagged ? { flagged: true, reason: result.reason } : {}),
+          }
+        : {}),
+    });
+    for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
+      viewerSocket.send(payload);
+    }
+  }
+  return hasUpgrade;
+}
+
+// Waits for the retained translation and delivers the line's terminal
+// message — but never waits past the correction window itself. Nothing in
+// the translate+verify chain (raceAgainstDeadline included) ever cancels or
+// times out the underlying LLM calls; raceAgainstDeadline only decides what
+// to *publish* at the deadline. So an LLM call that hangs outright, rather
+// than erroring, must not leave a viewer's waiting state stuck forever.
+// Racing `preparedPromise` against the *remaining* window (from `shedAt`)
+// guarantees exactly one terminal message even then. If the translation
+// lands after the settle already went out, it is still cached — never pushed
+// live — for future subscribers, per sendCorrection's cache-is-unconditional
+// rule above.
+//
+// Gated on `sendPromise` — the ordered-send link for this line's own English
+// caption — because the translation can resolve while that link is still
+// queued behind other work, and a correction that overtook its own caption
+// would patch a line the viewer does not have yet.
+//
+// `markedLanguages` is the shed-time snapshot of which languages were told
+// `awaitingCorrection: true` (see sendCorrection). `shedEnglish` is the
+// line's English text at that same moment: `TranscriptBuffer.reinstate`
+// mutates the same CaptionLine object in place, so an admin who removes and
+// then reinstates this line *with edited text* while a correction is still
+// in flight leaves `line.suppressed === false` again — the suppressed guard
+// below would miss that. Comparing the live `line.english` against the
+// snapshot catches it: a stale correction must never overwrite an
+// operator's edit.
+function scheduleCorrection(
+  deps: WsServerDeps,
+  line: CaptionLine,
+  preparedPromise: Promise<PreparedLanguageResult[] | null>,
+  shedAt: number,
+  sendPromise: Promise<void>,
+  markedLanguages: string[],
+  shedEnglish: string
+): void {
+  const sessionId = deps.session.id;
+  void (async () => {
+    try {
+      await sendPromise;
+
+      const remaining = deps.maxCorrectionLagMs - (Date.now() - shedAt);
+      let results: PreparedLanguageResult[] | null;
+      let timedOut: boolean;
+
+      if (remaining <= 0) {
+        results = null;
+        timedOut = true;
+      } else {
+        let timer: ReturnType<typeof setTimeout>;
+        const timeout = new Promise<typeof DEADLINE_REACHED>((resolve) => {
+          timer = setTimeout(() => resolve(DEADLINE_REACHED), remaining);
+        });
+        try {
+          // Neutralize a preparedPromise rejection into the race itself
+          // (rather than a separate unguarded subscription) so a failed
+          // translate/verify still settles instead of leaving this branch's
+          // rejection unhandled.
+          const outcome = await Promise.race([preparedPromise.catch(() => null), timeout]);
+          timedOut = outcome === DEADLINE_REACHED;
+          results = outcome === DEADLINE_REACHED ? null : outcome;
+        } finally {
+          clearTimeout(timer!);
+        }
+      }
+
+      // A bailed correction still owes the operator a log line: without one,
+      // an N-shed / (N-fewer)-corrected gap has no explanation. `outcome:
+      // 'bailed'` distinguishes these from the terminal 'upgrade'/'settle'
+      // outcomes below. Logged against `shedEnglish` (not the possibly-since-
+      // edited `line.english`) so it still correlates with the
+      // caption_lag_shed event that started this correction.
+      const logCorrectionBail = (reason: 'session_restarted' | 'suppressed' | 'text_edited'): void => {
+        void logEvent('info', {
+          event: 'caption_corrected',
+          outcome: 'bailed',
+          reason,
+          id: line.id,
+          english: shedEnglish,
+          lagMs: Date.now() - shedAt,
+        });
+      };
+
+      // A correction from a previous session must never patch a line in a new
+      // one; Session.start() assigns a fresh id.
+      if (deps.session.id !== sessionId) {
+        logCorrectionBail('session_restarted');
+        return;
+      }
+      // Admin-removed while the translation was in flight — the viewer already
+      // got line-removed, so there is no line left to correct.
+      if (line.suppressed) {
+        logCorrectionBail('suppressed');
+        return;
+      }
+      // Admin removed *and reinstated with different text* while the
+      // translation was in flight — line.suppressed is false again (same
+      // mutated object), but the English this translation corresponds to no
+      // longer matches what's on screen. Sending it would silently overwrite
+      // the operator's edit.
+      if (line.english !== shedEnglish) {
+        logCorrectionBail('text_edited');
+        return;
+      }
+
+      const hasUpgrade = sendCorrection(deps, line, results, !timedOut, markedLanguages);
+      // `no_result` covers a `null` results — the prepared promise rejected,
+      // or the line was suppressed inside prepareTranslationsForPublish.
+      // `empty_result` is operationally the same "nothing came back" outcome
+      // but reached a different way: translateWithFallback swallowed both
+      // attempts and resolved to `{}`, so prepareTranslationsForPublish
+      // returned `[]` rather than `null`. Kept distinct from `no_result`
+      // (rather than folded together) because they're diagnostically
+      // different for an operator tuning MAX_CORRECTION_LAG_MS — a rejected
+      // promise/suppressed line points at session or admin state, while an
+      // empty result points at the translation provider itself.
+      const settleReason = hasUpgrade
+        ? undefined
+        : timedOut
+          ? 'window_expired'
+          : results === null
+            ? 'no_result'
+            : results.length === 0
+              ? 'empty_result'
+              : 'not_an_improvement';
+      void logEvent('info', {
+        event: 'caption_corrected',
+        outcome: hasUpgrade ? 'upgrade' : 'settle',
+        ...(settleReason ? { reason: settleReason } : {}),
+        id: line.id,
+        english: line.english,
+        lagMs: Date.now() - shedAt,
+      });
+
+      if (timedOut) {
+        // The translation may still land after the window closed (or never,
+        // if it truly hung or failed outright) — cache it for future
+        // subscribers if and when it does, re-checking the same guards at
+        // that later point since a session restart, admin removal, or
+        // admin edit could happen in the meantime too.
+        void preparedPromise
+          .then((lateResults) => {
+            if (deps.session.id !== sessionId) return;
+            if (line.suppressed) return;
+            if (line.english !== shedEnglish) return;
+            if (lateResults) cacheCorrectedTranslations(deps, line, lateResults);
+          })
+          .catch(() => {});
+      }
+    } catch (error) {
+      // sendPromise is not expected to reject here — ws's send() only throws
+      // synchronously for a CONNECTING socket, and viewers are only
+      // registered once OPEN. It is also session.publishQueue itself, so an
+      // unexpected throw here would otherwise silently kill every subsequent
+      // line's correction with no trace — hence the log rather than a bare
+      // swallow.
+      void logEvent('error', {
+        event: 'correction_failed',
+        english: line.english,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  })();
 }
 
 function buildReinstateTranslation(

@@ -233,30 +233,48 @@ function ViewerPageContent() {
         onScroll={handleScroll}
         className="flex-1 overflow-y-auto px-6 sm:px-10 pt-4 pb-16 space-y-3"
       >
-        {lines.map((line, index) =>
-          line.removed ? (
-            <div key={line.id} className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span className="flex-1 border-t border-dashed" />
-              <span>Line removed</span>
-              <span className="flex-1 border-t border-dashed" />
-            </div>
-          ) : (
-            <div key={line.id} className="flex items-start gap-2 hover:bg-accent/50 p-2 rounded-md transition-colors">
-              <div className="flex-1 min-w-0">
-                {!line.pending && <p className="text-sm text-muted-foreground">{line.english}</p>}
-                <p
-                  className={`text-xl sm:text-2xl transition-colors duration-500 ${
-                    line.pending ? 'italic text-muted-foreground/60' : line.flagged ? 'text-rose-400' : ''
-                  }`}
-                >
-                  {line.pending ? line.english : line.translated}
-                </p>
-                {line.flagged && line.reason && <p className="text-xs text-rose-400/80">{line.reason}</p>}
+        {lines.map((line, index) => {
+          if (line.removed) {
+            return (
+              <div key={line.id} className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span className="flex-1 border-t border-dashed" />
+                <span>Line removed</span>
+                <span className="flex-1 border-t border-dashed" />
               </div>
-              {!line.pending && renderLineFeedback(index, line)}
+            );
+          }
+
+          // 'pending' (translation not started) and 'awaitingCorrection'
+          // (published as English, upgrade may follow) are distinct on the
+          // server but identical to a viewer: same text on screen, same
+          // meaning, same exit condition. Render them as one state.
+          const awaiting = Boolean(line.pending || line.awaitingCorrection);
+
+          return (
+            <div
+              key={line.id}
+              aria-busy={awaiting}
+              className={`flex items-start gap-2 hover:bg-accent/50 p-2 pl-3 rounded-md border-l-2 transition-colors ${
+                awaiting ? 'border-amber-500' : 'border-transparent'
+              }`}
+            >
+              <div className="flex-1 min-w-0">
+                {!awaiting && <p className="text-sm text-muted-foreground">{line.english}</p>}
+                <p
+                  className={`transition-colors duration-500 ${
+                    awaiting ? 'text-lg sm:text-xl' : 'text-xl sm:text-2xl'
+                  } ${!awaiting && line.flagged ? 'text-rose-400' : ''}`}
+                >
+                  {awaiting ? line.english : line.translated}
+                </p>
+                {!awaiting && line.flagged && line.reason && (
+                  <p className="text-xs text-rose-400/80">{line.reason}</p>
+                )}
+              </div>
+              {!awaiting && renderLineFeedback(index, line)}
             </div>
-          )
-        )}
+          );
+        })}
         <div ref={bottomRef} />
       </div>
       {showJumpButton && (

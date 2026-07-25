@@ -189,6 +189,7 @@ describe('wsServer', () => {
       deepgramCostFlushIntervalMs: 5000,
       viewerBacklogTranslateLimit: 30,
       maxPublishLagMs: 60000,
+      maxCorrectionLagMs: 0,
     };
     attachWsServer(deps);
 
@@ -3072,6 +3073,506 @@ describe('wsServer', () => {
       logSpy.mockRestore();
       captureSocket.close();
       viewerSocket.close();
+    });
+  });
+
+  describe('late translation correction — shed marking', () => {
+    it('marks a deadline-shed caption as awaiting a correction when corrections are enabled', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 30000;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((m) => m[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        return new Promise((resolve) => setTimeout(() => resolve({ text: '{"zh":"你好"}' }), 300));
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(120);
+
+      const caption = messages.find((m) => m.type === 'caption');
+      expect(caption).toEqual({
+        type: 'caption',
+        id: expect.any(String),
+        english: 'Hello everyone',
+        translated: 'Hello everyone',
+        awaitingCorrection: true,
+      });
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('does not mark a shed caption when corrections are disabled', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 0;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((m) => m[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        return new Promise((resolve) => setTimeout(() => resolve({ text: '{"zh":"你好"}' }), 300));
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(120);
+
+      const caption = messages.find((m) => m.type === 'caption');
+      expect(caption).not.toHaveProperty('awaitingCorrection');
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('never marks an ingest-shed caption as awaiting a correction', async () => {
+      deps.maxPublishLagMs = 8000;
+      deps.maxCorrectionLagMs = 30000;
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      // Drive publish lag over the threshold so the next segment is ingest-shed.
+      session.liveLag.enqueue(Date.now() - 20000);
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Behind line');
+      await delay(80);
+
+      const caption = messages.find((m) => m.type === 'caption');
+      expect(caption).toEqual({
+        type: 'caption',
+        id: expect.any(String),
+        english: 'Behind line',
+        translated: 'Behind line',
+      });
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+  });
+
+  describe('late translation correction — delivery', () => {
+    // Sheds at 30ms, translation resolves at 200ms, correction window is wide.
+    function mockSlowTranslate(): void {
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((m) => m[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        return new Promise((resolve) => setTimeout(() => resolve({ text: '{"zh":"你好"}' }), 200));
+      });
+    }
+
+    async function startSessionWithViewer(): Promise<{ captureSocket: WebSocket; viewerSocket: WebSocket; messages: any[] }> {
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+      return { captureSocket, viewerSocket, messages };
+    }
+
+    it('upgrades a shed line in place when its translation lands inside the window', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 30000;
+      mockSlowTranslate();
+
+      const { captureSocket, viewerSocket, messages } = await startSessionWithViewer();
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(400);
+
+      const caption = messages.find((m) => m.type === 'caption');
+      expect(caption).toMatchObject({ translated: 'Hello everyone', awaitingCorrection: true });
+
+      const corrections = messages.filter((m) => m.type === 'caption-corrected');
+      expect(corrections).toEqual([
+        { type: 'caption-corrected', id: caption.id, translated: '你好' },
+      ]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('sends the correction after the caption it patches, never before', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 30000;
+      mockSlowTranslate();
+
+      const { captureSocket, viewerSocket, messages } = await startSessionWithViewer();
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(400);
+
+      const types = messages.map((m) => m.type);
+      expect(types.indexOf('caption')).toBeGreaterThanOrEqual(0);
+      expect(types.indexOf('caption-corrected')).toBeGreaterThan(types.indexOf('caption'));
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('settles without new text — but still caches the translation — once the window has expired', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 1; // expires long before the 200ms translation lands
+      mockSlowTranslate();
+
+      const { captureSocket, viewerSocket, messages } = await startSessionWithViewer();
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(400);
+
+      const caption = messages.find((m) => m.type === 'caption');
+      const corrections = messages.filter((m) => m.type === 'caption-corrected');
+      // Exactly one terminal message, carrying no replacement text.
+      expect(corrections).toEqual([{ type: 'caption-corrected', id: caption.id }]);
+
+      // The real translation still reached the cache, so a fresh subscriber gets it.
+      const laterViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(laterViewer);
+      laterViewer.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      const backlog = await waitForMessage(laterViewer);
+      expect(backlog.lines).toEqual([
+        { id: caption.id, english: 'Hello everyone', translated: '你好' },
+      ]);
+
+      laterViewer.close();
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('sends no correction for a line removed by an admin before the translation lands', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 30000;
+      mockSlowTranslate();
+
+      const { captureSocket, viewerSocket, messages } = await startSessionWithViewer();
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(120); // shed has happened; translation still in flight
+
+      const caption = messages.find((m) => m.type === 'caption');
+      session.buffer.suppress(caption.id);
+      await delay(300);
+
+      expect(messages.filter((m) => m.type === 'caption-corrected')).toEqual([]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('sends no correction when corrections are disabled', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 0;
+      mockSlowTranslate();
+
+      const { captureSocket, viewerSocket, messages } = await startSessionWithViewer();
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(400);
+
+      expect(messages.filter((m) => m.type === 'caption-corrected')).toEqual([]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('settles rather than upgrading when the late translation is flagged unsafe', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 30000;
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: '{"zh":{"safe":false,"reason":"polarity flip"}}' });
+        }
+        return new Promise((resolve) => setTimeout(() => resolve({ text: '{"zh":"耶稣不爱你"}' }), 200));
+      });
+
+      const { captureSocket, viewerSocket, messages } = await startSessionWithViewer();
+      capturedCallbacks!.onFinalSegment('Jesus loves you');
+      await delay(400);
+
+      const caption = messages.find((m) => m.type === 'caption');
+      // hide mode: the flagged translation must never reach the viewer, so the
+      // terminal message clears the waiting state without replacing the text.
+      expect(messages.filter((m) => m.type === 'caption-corrected')).toEqual([
+        { type: 'caption-corrected', id: caption.id },
+      ]);
+
+      warnSpy.mockRestore();
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('settles a hung translation once the correction window itself expires', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 50;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        // The translate call itself hangs forever — never resolves, never
+        // rejects — simulating an LLM call that stalls on the network rather
+        // than erroring. Nothing in the translate/verify chain has a
+        // timeout, so only scheduleCorrection's own window-bound race can
+        // rescue the viewer from waiting on this line indefinitely.
+        return new Promise(() => {});
+      });
+
+      const { captureSocket, viewerSocket, messages } = await startSessionWithViewer();
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(400);
+
+      const caption = messages.find((m) => m.type === 'caption');
+      expect(caption).toMatchObject({ translated: 'Hello everyone', awaitingCorrection: true });
+
+      // Exactly one terminal message, carrying no replacement text — the
+      // translation never arrived, so there is nothing to upgrade with.
+      expect(messages.filter((m) => m.type === 'caption-corrected')).toEqual([
+        { type: 'caption-corrected', id: caption.id },
+      ]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('does not strand a viewer who joins a new language during the correction window', async () => {
+      // A wider deadline (150ms) than the other tests here: the 'ko' viewer
+      // below must finish its subscribe round-trip (a real, if fast, WS
+      // handshake) before the deadline fires, so the window needs enough
+      // margin over that setup cost to be reliable. It is still well under
+      // the 300ms translation delay.
+      deps.maxPublishLagMs = 150;
+      deps.maxCorrectionLagMs = 30000;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((m) => m[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        // Subscribing 'ko' backfills the already-published-pending line via
+        // the *backlog* translate path (a distinct prompt/response shape
+        // from the live path below) — resolve it immediately so the
+        // subscribe round-trip isn't itself delayed by 300ms and racing the
+        // shed deadline for the wrong reason.
+        if (params.contents.includes('Translate each of these sentences')) {
+          return Promise.resolve({ text: '{"translations":["你好"]}' });
+        }
+        // Only 'zh' was active at ingest time (the 'ko' viewer below joins
+        // after the translate call was already made), so this never
+        // produces a 'ko' entry — mirroring a real request that was built
+        // from the languages active before the join.
+        return new Promise((resolve) => setTimeout(() => resolve({ text: '{"zh":"你好"}' }), 300));
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const zhViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(zhViewer);
+      zhViewer.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(zhViewer); // backlog: []
+      const zhMessages: any[] = [];
+      zhViewer.on('message', (data) => zhMessages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+
+      // Join 'ko' immediately — no artificial delay — so the (fast, but
+      // real) subscribe round-trip has the full 150ms deadline window as
+      // margin, guaranteeing 'ko' is active by shed time despite never
+      // being part of the translate request made at ingest time.
+      const koViewer = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(koViewer);
+      koViewer.send(JSON.stringify({ type: 'subscribe', language: 'ko' }));
+      await waitForMessage(koViewer); // backlog: []
+      const koMessages: any[] = [];
+      koViewer.on('message', (data) => koMessages.push(JSON.parse(data.toString())));
+
+      await delay(500);
+
+      // The zh viewer, whose language was actually translated, gets the
+      // real upgrade.
+      expect(zhMessages.filter((m) => m.type === 'caption-corrected')).toEqual([
+        { type: 'caption-corrected', id: expect.any(String), translated: '你好' },
+      ]);
+
+      // The ko viewer was marked awaiting at shed time (it was active then)
+      // but the late results contain no 'ko' entry. Before the fix, the
+      // language set for the correction was re-derived from those late
+      // results, so this viewer received zero terminal messages and stayed
+      // marked awaiting forever. It must instead receive exactly one
+      // settle.
+      expect(koMessages.filter((m) => m.type === 'caption-corrected')).toEqual([
+        { type: 'caption-corrected', id: expect.any(String) },
+      ]);
+
+      captureSocket.close();
+      zhViewer.close();
+      koViewer.close();
+    });
+
+    it('settles every marked viewer — not zero — when translation fails entirely for the line', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 30000;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          return Promise.resolve({ text: '{}' });
+        }
+        // Both translate attempts fail — translateWithFallback swallows
+        // this and resolves to {}, so prepareTranslationsForPublish's late
+        // results end up as [] (truthy but empty): nothing to upgrade with
+        // for any language. Delayed (rather than an immediate rejection) so
+        // the 30ms deadline timer — a real macrotask — actually wins the
+        // race and sheds; an immediately-rejecting promise resolves via
+        // microtasks only, which would starve the timer and never shed.
+        return new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error('translate unavailable')), 50)
+        );
+      });
+
+      const { captureSocket, viewerSocket, messages } = await startSessionWithViewer();
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(400);
+
+      const caption = messages.find((m) => m.type === 'caption');
+      expect(caption).toMatchObject({ translated: 'Hello everyone', awaitingCorrection: true });
+
+      // The zh viewer was marked awaiting; it must still get exactly one
+      // terminal message. Before the fix, an empty-but-truthy late results
+      // array collapsed the language list to [], so every marked viewer of
+      // this line was messaged zero times and stayed marked forever.
+      expect(messages.filter((m) => m.type === 'caption-corrected')).toEqual([
+        { type: 'caption-corrected', id: caption.id },
+      ]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it("does not let a stale correction overwrite an admin's edit reinstated while it was in flight", async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 30000;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((m) => m[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        // The reinstated (edited) text translates immediately, well before
+        // the original shed line's own (slow) translation ever resolves —
+        // mirroring an operator's edit landing while an already-hung
+        // translate call for the original wording is still in flight.
+        if (params.contents.includes('Corrected text')) {
+          return Promise.resolve({ text: '{"zh":"更正后的文本"}' });
+        }
+        return new Promise((resolve) => setTimeout(() => resolve({ text: '{"zh":"你好（旧）"}' }), 300));
+      });
+
+      const { captureSocket, viewerSocket, messages } = await startSessionWithViewer();
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(120); // shed has happened (30ms deadline); original translation (300ms) still pending
+
+      const caption = messages.find((m) => m.type === 'caption');
+      expect(caption).toMatchObject({ awaitingCorrection: true });
+
+      session.buffer.suppress(caption.id);
+      // No waitForOpen before this: attaching the message listener must
+      // happen in the same synchronous step as the connection so it cannot
+      // race the server's immediate backlog send (which — since this test
+      // runs well after 'start', unlike other reinstate tests — would
+      // otherwise be missed in favour of the next message the socket
+      // happens to receive).
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
+      await waitForMessage(reviewSocket); // backlog
+      reviewSocket.send(JSON.stringify({ type: 'reinstate', id: caption.id, english: 'Corrected text' }));
+
+      await delay(500); // both the stale (300ms) and the reinstated translation resolve
+
+      // The original scheduleCorrection must recognise line.english no
+      // longer matches what it shed (TranscriptBuffer.reinstate mutates the
+      // same CaptionLine object) and send nothing for it — never a
+      // 'caption-corrected' carrying the superseded translation.
+      const staleCorrections = messages.filter(
+        (m) => m.type === 'caption-corrected' && m.translated === '你好（旧）'
+      );
+      expect(staleCorrections).toEqual([]);
+
+      // The cache under this id must never be overwritten with the stale
+      // translation either.
+      expect(session.translationCache.get('zh', caption.id)?.translated).not.toBe('你好（旧）');
+
+      captureSocket.close();
+      viewerSocket.close();
+      reviewSocket.close();
     });
   });
 });
