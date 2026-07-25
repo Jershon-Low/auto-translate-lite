@@ -40,6 +40,17 @@ function isCacheRelatedError(error: unknown): boolean {
   return /cache/i.test(message);
 }
 
+// The 'stop' message handler and the socket 'close' handler can both fire for
+// the same session (e.g. a client sends 'stop' then immediately closes).
+// Swapping session.roleCaches out for the empty value synchronously, before
+// deletion starts, makes this atomic: whichever handler runs first claims the
+// refs, and the other sees the already-cleared value and deletes nothing.
+function clearAndDeleteRoleCaches(deps: WsServerDeps): Promise<void> {
+  const caches = deps.session.roleCaches;
+  deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
+  return deleteRoleCaches(deps.geminiClient, caches);
+}
+
 type EnqueuePublish = (
   line: CaptionLine,
   workPromise: Promise<Record<string, string>>,
@@ -71,6 +82,7 @@ export interface WsServerDeps {
   logHub: LogHub;
   deepgramCostFlushIntervalMs: number;
   viewerBacklogTranslateLimit: number;
+  maxPublishLagMs: number;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
@@ -112,31 +124,141 @@ export function attachWsServer(deps: WsServerDeps): void {
   });
 }
 
-function createEnqueuePublish(deps: WsServerDeps): EnqueuePublish {
-  return function enqueuePublish(
+interface Publisher {
+  enqueuePublish: EnqueuePublish;
+  publishEnglish: (line: CaptionLine, viewerMessageType?: 'caption' | 'caption-inserted') => void;
+}
+
+const DEADLINE_REACHED = Symbol('deadline-reached');
+
+// Publish the line's already-verified English text for every active language.
+// Mirrors prepareTranslationsForPublish's guards so a line suppressed
+// (admin-removed) mid-flight is still never published. English is always safe:
+// the line has already passed the transcription safety check.
+function englishFallbackResults(line: CaptionLine, deps: WsServerDeps): PreparedLanguageResult[] | null {
+  if (line.suppressed) return null;
+  return deps.session
+    .getActiveLanguages()
+    .map((language) => ({ language, translated: line.english, flagged: false }));
+}
+
+// Resolve to the verified translation results if they arrive before the
+// staleness deadline; otherwise resolve to the English fallback and let the
+// (now-stale) translation be discarded. Bounds how far behind a caption can
+// fall to ~maxPublishLagMs.
+async function raceAgainstDeadline(
+  preparedPromise: Promise<PreparedLanguageResult[] | null>,
+  deadlineMs: number,
+  line: CaptionLine,
+  deps: WsServerDeps
+): Promise<PreparedLanguageResult[] | null> {
+  // Attach a handler immediately so a rejection is never left unhandled,
+  // regardless of which branch below runs (the early-return path never
+  // otherwise touches preparedPromise).
+  void preparedPromise.catch(() => {});
+
+  const remaining = deadlineMs - Date.now();
+  if (remaining <= 0) {
+    void logEvent('warn', { event: 'caption_lag_shed', reason: 'publish_deadline', english: line.english });
+    return englishFallbackResults(line, deps);
+  }
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<typeof DEADLINE_REACHED>((resolve) => {
+    timer = setTimeout(() => resolve(DEADLINE_REACHED), remaining);
+  });
+  try {
+    const outcome = await Promise.race([preparedPromise, timeout]);
+    if (outcome === DEADLINE_REACHED) {
+      void logEvent('warn', { event: 'caption_lag_shed', reason: 'publish_deadline', english: line.english });
+      return englishFallbackResults(line, deps);
+    }
+    return outcome;
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+// Edge-triggered so a long congested stretch produces one "engaged" log and one
+// "disengaged" log, not one per line. Publish-path lag: how far behind the
+// oldest un-published line is.
+function reportLag(deps: WsServerDeps, lagMs: number): void {
+  const behind = lagMs >= deps.maxPublishLagMs;
+  if (behind && !deps.session.isBehind) {
+    deps.session.isBehind = true;
+    void logEvent('warn', { event: 'caption_backpressure_engaged', lagMs: Math.round(lagMs) });
+  } else if (!behind && deps.session.isBehind) {
+    deps.session.isBehind = false;
+    void logEvent('info', { event: 'caption_backpressure_disengaged', lagMs: Math.round(lagMs) });
+  }
+}
+
+// Ingest-path lag: how long a segment waited in the (un-sheddable) ingest queue
+// before processing began. Measured only — surfaces a slow transcription
+// verifier that back-pressure cannot fix.
+// Note: this only runs at the top of handleFinalSegmentFast, so the "cleared"
+// edge is next-segment-triggered, not proactive — if ingest wait spikes and
+// speech then stops entirely, ingest_lag_cleared won't log until a new segment
+// arrives. Harmless (no user-visible effect) and inherent to measuring lag
+// per-segment; unlike the publish path, there's no idle/drain callback to hook.
+function reportIngestLag(deps: WsServerDeps, ingestWaitMs: number): void {
+  const high = ingestWaitMs >= deps.maxPublishLagMs;
+  if (high && !deps.session.ingestLagHigh) {
+    deps.session.ingestLagHigh = true;
+    void logEvent('warn', { event: 'ingest_lag_high', ingestWaitMs: Math.round(ingestWaitMs) });
+  } else if (!high && deps.session.ingestLagHigh) {
+    deps.session.ingestLagHigh = false;
+    void logEvent('info', { event: 'ingest_lag_cleared', ingestWaitMs: Math.round(ingestWaitMs) });
+  }
+}
+
+function createEnqueuePublish(deps: WsServerDeps): Publisher {
+  // Shared tail: record the line in the lag tracker, then append one ordered
+  // link to publishQueue that sends the pre-computed results in order and
+  // dequeues afterward. Capturing `tracker` here (not re-reading it inside the
+  // async link) keeps enqueue and dequeue on the same instance even if the
+  // session restarts mid-flight.
+  function enqueueOrderedSend(
     line: CaptionLine,
-    workPromise: Promise<Record<string, string>>,
-    viewerMessageType: 'caption' | 'caption-inserted' = 'caption'
+    enqueuedAt: number,
+    resultsPromise: Promise<PreparedLanguageResult[] | null>,
+    viewerMessageType: 'caption' | 'caption-inserted'
   ): void {
-    // Translate + verify for this line starts immediately (not gated on the
-    // queue below), so a slow line doesn't stall the network work for lines
-    // behind it — only the final, already-computed send is kept in order.
-    const preparedPromise = workPromise
-      .then((translations) => prepareTranslationsForPublish(line, translations, deps))
-      .catch((error) => {
+    const tracker = deps.session.liveLag;
+    tracker.enqueue(enqueuedAt);
+    deps.session.publishQueue = deps.session.publishQueue.then(async () => {
+      let results: PreparedLanguageResult[] | null;
+      try {
+        results = await resultsPromise;
+      } catch (error) {
         void logEvent('error', {
           event: 'publish_failed',
           english: line.english,
           error: error instanceof Error ? error.message : String(error),
         });
-        return null;
-      });
-
-    deps.session.publishQueue = deps.session.publishQueue.then(async () => {
-      const results = await preparedPromise;
+        results = null;
+      } finally {
+        tracker.dequeue();
+      }
       sendPrepared(line, results, deps, viewerMessageType);
+      reportLag(deps, deps.session.liveLag.lagMs(Date.now()));
     });
+  }
+
+  const enqueuePublish: EnqueuePublish = (line, workPromise, viewerMessageType = 'caption') => {
+    const enqueuedAt = Date.now();
+    // Translate + verify still starts immediately (not gated on the queue), as before.
+    const preparedPromise = workPromise.then((translations) =>
+      prepareTranslationsForPublish(line, translations, deps)
+    );
+    const resultsPromise = raceAgainstDeadline(preparedPromise, enqueuedAt + deps.maxPublishLagMs, line, deps);
+    enqueueOrderedSend(line, enqueuedAt, resultsPromise, viewerMessageType);
   };
+
+  const publishEnglish = (line: CaptionLine, viewerMessageType: 'caption' | 'caption-inserted' = 'caption'): void => {
+    enqueueOrderedSend(line, Date.now(), Promise.resolve(englishFallbackResults(line, deps)), viewerMessageType);
+  };
+
+  return { enqueuePublish, publishEnglish };
 }
 
 function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
@@ -211,7 +333,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
     });
   }
 
-  const enqueuePublish = createEnqueuePublish(deps);
+  const { enqueuePublish, publishEnglish } = createEnqueuePublish(deps);
 
   ws.on('message', (data, isBinary) => {
     void (async () => {
@@ -261,8 +383,9 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                 flushPendingAudio();
               },
               onFinalSegment: (text) => {
+                const receivedAt = Date.now();
                 deps.session.ingestQueue = deps.session.ingestQueue
-                  .then(() => handleFinalSegmentFast(text, deps, ws, enqueuePublish, schedulePrefetch))
+                  .then(() => handleFinalSegmentFast(text, deps, ws, enqueuePublish, publishEnglish, schedulePrefetch, receivedAt))
                   .catch((error) => {
                     void logEvent('error', {
                       event: 'segment_processing_failed',
@@ -303,8 +426,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
               avgBytesPerChunk: audioChunkCount > 0 ? Math.round(audioByteCount / audioChunkCount) : 0,
             });
             deps.session.stop();
-            await deleteRoleCaches(deps.geminiClient, deps.session.roleCaches);
-            deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
+            await clearAndDeleteRoleCaches(deps);
             deepgramConnection?.finish();
             deepgramConnection = null;
             resetAudioBuffering();
@@ -349,9 +471,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
     });
     if (deps.session.captureSocket === ws) deps.session.captureSocket = null;
     deps.session.stop();
-    void deleteRoleCaches(deps.geminiClient, deps.session.roleCaches).then(() => {
-      deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
-    });
+    void clearAndDeleteRoleCaches(deps);
     deepgramConnection?.finish();
     resetAudioBuffering();
 
@@ -375,7 +495,7 @@ function buildReviewBacklogLine(line: CaptionLine): Record<string, unknown> {
 }
 
 function handleReviewConnection(ws: WebSocket, deps: WsServerDeps): void {
-  const enqueuePublish = createEnqueuePublish(deps);
+  const { enqueuePublish } = createEnqueuePublish(deps);
 
   ws.send(
     JSON.stringify({
@@ -630,8 +750,12 @@ async function handleFinalSegmentFast(
   deps: WsServerDeps,
   captureSocket: WebSocket,
   enqueuePublish: EnqueuePublish,
-  schedulePrefetch: (line: CaptionLine, precedingContext: string[]) => void
+  publishEnglish: (line: CaptionLine, viewerMessageType?: 'caption' | 'caption-inserted') => void,
+  schedulePrefetch: (line: CaptionLine, precedingContext: string[]) => void,
+  receivedAt: number
 ): Promise<void> {
+  reportIngestLag(deps, Date.now() - receivedAt);
+
   const recentLines = deps.session.buffer.getRecent();
   const precedingContext = recentLines
     .filter((recentLine) => !recentLine.suppressed)
@@ -684,6 +808,17 @@ async function handleFinalSegmentFast(
   const pendingPayload = JSON.stringify({ type: 'caption-pending', id: line.id, english: line.english });
   for (const viewerSocket of deps.session.getAllViewers()) {
     viewerSocket.send(pendingPayload);
+  }
+
+  const lagMs = deps.session.liveLag.lagMs(Date.now());
+  reportLag(deps, lagMs);
+  if (lagMs >= deps.maxPublishLagMs) {
+    // Behind: skip translation entirely and publish the (already
+    // transcription-verified) English now, so the live LLM budget frees up and
+    // the pipeline catches up.
+    void logEvent('warn', { event: 'caption_lag_shed', reason: 'ingest_backpressure', english, lagMs: Math.round(lagMs) });
+    publishEnglish(line);
+    return;
   }
 
   const activeLanguages = deps.session.getActiveLanguages();

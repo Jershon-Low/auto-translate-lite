@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import { TranscriptBuffer } from './transcriptBuffer.js';
 import { TranslationCache } from './translationCache.js';
+import { LiveLagTracker } from './liveLag.js';
 import type { RoleCaches } from './sermonCache.js';
 import type { RoleProviders, BacklogProviders } from './llmTypes.js';
 import type { TranslationFlagDisplayMode } from './translationFlagDisplayStore.js';
@@ -26,6 +27,9 @@ export class Session {
   captureSocket: WebSocket | null = null;
   ingestQueue: Promise<void> = Promise.resolve();
   publishQueue: Promise<void> = Promise.resolve();
+  liveLag: LiveLagTracker = new LiveLagTracker();
+  isBehind: boolean = false;
+  ingestLagHigh: boolean = false;
   private viewers: Map<WebSocket, string> = new Map();
   private reviewSockets: Set<WebSocket> = new Set();
 
@@ -41,6 +45,9 @@ export class Session {
     this.translationFlagDisplayMode = 'hide';
     this.ingestQueue = Promise.resolve();
     this.publishQueue = Promise.resolve();
+    this.liveLag = new LiveLagTracker();
+    this.isBehind = false;
+    this.ingestLagHigh = false;
   }
 
   stop(): void {

@@ -188,6 +188,7 @@ describe('wsServer', () => {
       adminPasscode: 'test-passcode',
       deepgramCostFlushIntervalMs: 5000,
       viewerBacklogTranslateLimit: 30,
+      maxPublishLagMs: 60000,
     };
     attachWsServer(deps);
 
@@ -870,6 +871,30 @@ describe('wsServer', () => {
       expect(session.roleCaches).toEqual({ transcriptionVerifier: null, translation: null, translationVerifier: null });
 
       captureSocket.close();
+    });
+
+    it('does not double-delete role caches when the stop handler and the socket close handler race', async () => {
+      (geminiClient.caches.delete as ReturnType<typeof vi.fn>).mockImplementation(
+        () => new Promise((resolve) => setTimeout(resolve, 50))
+      );
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      // Send 'stop' and close the socket back-to-back, without waiting for
+      // the 'stop' handler's deleteRoleCaches call to resolve. This races
+      // the 'stop' message handler against the socket 'close' handler —
+      // both historically read and deleted whatever refs were in
+      // session.roleCaches at the time, with no coordination between them.
+      captureSocket.send(JSON.stringify({ type: 'stop' }));
+      captureSocket.close();
+
+      await delay(150);
+
+      expect(geminiClient.caches.delete).toHaveBeenCalledTimes(3);
+      expect(session.roleCaches).toEqual({ transcriptionVerifier: null, translation: null, translationVerifier: null });
     });
 
     it('rebuilds all three caches on a second start (reconnect)', async () => {
@@ -2811,6 +2836,242 @@ describe('wsServer', () => {
       const socket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
       await waitForOpen(socket);
       socket.close();
+    });
+  });
+
+  describe('live-queue back-pressure — publish deadline', () => {
+    it('publishes the English line when its translation misses the staleness deadline', async () => {
+      deps.maxPublishLagMs = 30;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((m) => m[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        // Translation is slower than the 30ms deadline.
+        return new Promise((resolve) => setTimeout(() => resolve({ text: '{"zh":"你好"}' }), 300));
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      // Past both the 30ms deadline and the 300ms slow translate: the deadline
+      // must have published English, and the late translation must be discarded
+      // (no second caption).
+      await delay(350);
+
+      const captions = messages.filter((m) => m.type === 'caption');
+      expect(captions).toEqual([
+        { type: 'caption', id: expect.any(String), english: 'Hello everyone', translated: 'Hello everyone' },
+      ]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('keeps caption order when deadline-shed English lines drain the queue', async () => {
+      deps.maxPublishLagMs = 30;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((m) => m[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        // Both lines translate slower than the deadline, so both are shed to English.
+        return new Promise((resolve) => setTimeout(() => resolve({ text: '{"zh":"译"}' }), 300));
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Line 1');
+      await waitForMessage(captureSocket); // Line 1 transcript ack
+      capturedCallbacks!.onFinalSegment('Line 2');
+      await waitForMessage(captureSocket); // Line 2 transcript ack
+
+      await delay(400);
+
+      const captions = messages.filter((m) => m.type === 'caption');
+      expect(captions).toEqual([
+        { type: 'caption', id: expect.any(String), english: 'Line 1', translated: 'Line 1' },
+        { type: 'caption', id: expect.any(String), english: 'Line 2', translated: 'Line 2' },
+      ]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+  });
+
+  describe('live-queue back-pressure — ingest load shed', () => {
+    it('sheds translation for a newly ingested line when the pipeline is behind', async () => {
+      deps.maxPublishLagMs = 8000;
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      // Simulate a standing publish backlog: an entry that has been waiting 20s,
+      // so lagMs (~20000) is over the 8000ms threshold at the next ingest.
+      session.liveLag.enqueue(Date.now() - 20000);
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Behind line');
+      await delay(50);
+
+      // The viewer gets English, and no translate call was made for this line.
+      const captions = messages.filter((m) => m.type === 'caption');
+      expect(captions).toEqual([
+        { type: 'caption', id: expect.any(String), english: 'Behind line', translated: 'Behind line' },
+      ]);
+      const translateCalls = (geminiClient.models.generateContent as any).mock.calls.filter(isTranslateCall);
+      expect(translateCalls.some((c: any) => c[0].contents.includes('Behind line'))).toBe(false);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('still suppresses a flagged transcription even when the pipeline is behind', async () => {
+      deps.maxPublishLagMs = 8000;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":false,"reason":"likely mis-heard negation"}' });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      // Even deeply behind, a flagged transcription must never reach viewers.
+      session.liveLag.enqueue(Date.now() - 20000);
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
+      const transcript = await transcriptPromise;
+      expect(transcript).toMatchObject({ flagged: true });
+
+      await delay(50);
+      // Only a line-removed — never a caption — reaches the viewer.
+      expect(messages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+      expect(session.buffer.getRecent()[0]).toMatchObject({ id: transcript.id, suppressed: true });
+
+      warnSpy.mockRestore();
+      captureSocket.close();
+      viewerSocket.close();
+    });
+  });
+
+  describe('live-queue back-pressure — edge-triggered lag logging', () => {
+    it('logs caption_backpressure_engaged exactly once across a congested stretch, then caption_backpressure_disengaged exactly once on recovery', async () => {
+      deps.maxPublishLagMs = 8000;
+      // 'caption_backpressure_engaged'/'caption_lag_shed' log at 'warn' level
+      // (console.warn); 'caption_backpressure_disengaged' logs at 'info' level,
+      // which logger.ts writes via console.log.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const engagedCalls = () =>
+        warnSpy.mock.calls.filter((call) => String(call[0]).includes('caption_backpressure_engaged'));
+      const disengagedCalls = () =>
+        logSpy.mock.calls.filter((call) => String(call[0]).includes('caption_backpressure_disengaged'));
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      // Simulate a standing publish backlog of two lines, both already far past
+      // the 8000ms threshold, so the pipeline reads "behind" across two
+      // separate ingest events before it fully drains.
+      session.liveLag.enqueue(Date.now() - 20000);
+      session.liveLag.enqueue(Date.now() - 19000);
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      // First ingested line while behind: crosses the threshold and must log
+      // the engaged edge exactly once.
+      capturedCallbacks!.onFinalSegment('Behind line 1');
+      await delay(30); // let this line's shed-publish dequeue one stale backlog entry
+
+      expect(engagedCalls()).toHaveLength(1);
+      expect(disengagedCalls()).toHaveLength(0);
+
+      // Second ingested line while still behind (one stale backlog entry
+      // remains): must NOT log a second "engaged" event — this is the
+      // regression this test guards against (per-line log spam instead of
+      // edge-triggered logging).
+      capturedCallbacks!.onFinalSegment('Behind line 2');
+      await delay(30); // let this line's shed-publish dequeue the last stale entry and drain
+
+      expect(engagedCalls()).toHaveLength(1);
+      expect(disengagedCalls()).toHaveLength(1);
+
+      // Sanity: both lines were actually shed to English (not translated),
+      // confirming the scenario genuinely drove the publish path, not a no-op.
+      const captions = messages.filter((m) => m.type === 'caption');
+      expect(captions).toEqual([
+        { type: 'caption', id: expect.any(String), english: 'Behind line 1', translated: 'Behind line 1' },
+        { type: 'caption', id: expect.any(String), english: 'Behind line 2', translated: 'Behind line 2' },
+      ]);
+
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+      captureSocket.close();
+      viewerSocket.close();
     });
   });
 });
