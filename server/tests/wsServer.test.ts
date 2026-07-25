@@ -2896,4 +2896,70 @@ describe('wsServer', () => {
       viewerSocket.close();
     });
   });
+
+  describe('live-queue back-pressure — edge-triggered lag logging', () => {
+    it('logs caption_backpressure_engaged exactly once across a congested stretch, then caption_backpressure_disengaged exactly once on recovery', async () => {
+      deps.maxPublishLagMs = 8000;
+      // 'caption_backpressure_engaged'/'caption_lag_shed' log at 'warn' level
+      // (console.warn); 'caption_backpressure_disengaged' logs at 'info' level,
+      // which logger.ts writes via console.log.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const engagedCalls = () =>
+        warnSpy.mock.calls.filter((call) => String(call[0]).includes('caption_backpressure_engaged'));
+      const disengagedCalls = () =>
+        logSpy.mock.calls.filter((call) => String(call[0]).includes('caption_backpressure_disengaged'));
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      // Simulate a standing publish backlog of two lines, both already far past
+      // the 8000ms threshold, so the pipeline reads "behind" across two
+      // separate ingest events before it fully drains.
+      session.liveLag.enqueue(Date.now() - 20000);
+      session.liveLag.enqueue(Date.now() - 19000);
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      // First ingested line while behind: crosses the threshold and must log
+      // the engaged edge exactly once.
+      capturedCallbacks!.onFinalSegment('Behind line 1');
+      await delay(30); // let this line's shed-publish dequeue one stale backlog entry
+
+      expect(engagedCalls()).toHaveLength(1);
+      expect(disengagedCalls()).toHaveLength(0);
+
+      // Second ingested line while still behind (one stale backlog entry
+      // remains): must NOT log a second "engaged" event — this is the
+      // regression this test guards against (per-line log spam instead of
+      // edge-triggered logging).
+      capturedCallbacks!.onFinalSegment('Behind line 2');
+      await delay(30); // let this line's shed-publish dequeue the last stale entry and drain
+
+      expect(engagedCalls()).toHaveLength(1);
+      expect(disengagedCalls()).toHaveLength(1);
+
+      // Sanity: both lines were actually shed to English (not translated),
+      // confirming the scenario genuinely drove the publish path, not a no-op.
+      const captions = messages.filter((m) => m.type === 'caption');
+      expect(captions).toEqual([
+        { type: 'caption', id: expect.any(String), english: 'Behind line 1', translated: 'Behind line 1' },
+        { type: 'caption', id: expect.any(String), english: 'Behind line 2', translated: 'Behind line 2' },
+      ]);
+
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+      captureSocket.close();
+      viewerSocket.close();
+    });
+  });
 });

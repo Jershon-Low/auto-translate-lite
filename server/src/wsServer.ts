@@ -180,6 +180,11 @@ function reportLag(deps: WsServerDeps, lagMs: number): void {
 // Ingest-path lag: how long a segment waited in the (un-sheddable) ingest queue
 // before processing began. Measured only — surfaces a slow transcription
 // verifier that back-pressure cannot fix.
+// Note: this only runs at the top of handleFinalSegmentFast, so the "cleared"
+// edge is next-segment-triggered, not proactive — if ingest wait spikes and
+// speech then stops entirely, ingest_lag_cleared won't log until a new segment
+// arrives. Harmless (no user-visible effect) and inherent to measuring lag
+// per-segment; unlike the publish path, there's no idle/drain callback to hook.
 function reportIngestLag(deps: WsServerDeps, ingestWaitMs: number): void {
   const high = ingestWaitMs >= deps.maxPublishLagMs;
   if (high && !deps.session.ingestLagHigh) {
