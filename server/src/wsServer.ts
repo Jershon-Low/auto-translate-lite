@@ -735,15 +735,23 @@ function cacheCorrectedTranslations(deps: WsServerDeps, line: CaptionLine, resul
 // the late results directly would strand the former and message nobody for
 // the latter — every marked viewer is owed a terminal message regardless of
 // what the late results contain.
+// Returns whether at least one marked viewer actually received an upgrade —
+// the caller logs this instead of re-deriving it from `results` so the
+// caption_corrected log agrees with the wire by construction. Re-deriving it
+// from `results.some(...)` over *all* late results (rather than this loop's
+// `markedLanguages`) can disagree: if a language left and rejoined between
+// shed and prepare, `results` may contain an upgrade for it while this loop
+// never sends to it, or vice versa.
 function sendCorrection(
   deps: WsServerDeps,
   line: CaptionLine,
   results: PreparedLanguageResult[] | null,
   withinWindow: boolean,
   markedLanguages: string[]
-): void {
+): boolean {
   if (results) cacheCorrectedTranslations(deps, line, results);
 
+  let hasUpgrade = false;
   for (const language of markedLanguages) {
     const result = results?.find((entry) => entry.language === language);
 
@@ -752,6 +760,7 @@ function sendCorrection(
     // back to the English we already published, which is a settle, not an
     // upgrade.
     const isUpgrade = result !== undefined && withinWindow && result.translated !== line.english;
+    if (isUpgrade) hasUpgrade = true;
     const payload = JSON.stringify({
       type: 'caption-corrected',
       id: line.id,
@@ -766,6 +775,7 @@ function sendCorrection(
       viewerSocket.send(payload);
     }
   }
+  return hasUpgrade;
 }
 
 // Waits for the retained translation and delivers the line's terminal
@@ -833,35 +843,73 @@ function scheduleCorrection(
         }
       }
 
+      // A bailed correction still owes the operator a log line: without one,
+      // an N-shed / (N-fewer)-corrected gap has no explanation. `outcome:
+      // 'bailed'` distinguishes these from the terminal 'upgrade'/'settle'
+      // outcomes below. Logged against `shedEnglish` (not the possibly-since-
+      // edited `line.english`) so it still correlates with the
+      // caption_lag_shed event that started this correction.
+      const logCorrectionBail = (reason: 'session_restarted' | 'suppressed' | 'text_edited'): void => {
+        void logEvent('info', {
+          event: 'caption_corrected',
+          outcome: 'bailed',
+          reason,
+          id: line.id,
+          english: shedEnglish,
+          lagMs: Date.now() - shedAt,
+        });
+      };
+
       // A correction from a previous session must never patch a line in a new
       // one; Session.start() assigns a fresh id.
-      if (deps.session.id !== sessionId) return;
+      if (deps.session.id !== sessionId) {
+        logCorrectionBail('session_restarted');
+        return;
+      }
       // Admin-removed while the translation was in flight — the viewer already
       // got line-removed, so there is no line left to correct.
-      if (line.suppressed) return;
+      if (line.suppressed) {
+        logCorrectionBail('suppressed');
+        return;
+      }
       // Admin removed *and reinstated with different text* while the
       // translation was in flight — line.suppressed is false again (same
       // mutated object), but the English this translation corresponds to no
       // longer matches what's on screen. Sending it would silently overwrite
       // the operator's edit.
-      if (line.english !== shedEnglish) return;
+      if (line.english !== shedEnglish) {
+        logCorrectionBail('text_edited');
+        return;
+      }
 
-      const hasUpgrade = !timedOut && results !== null && results.some((result) => result.translated !== line.english);
+      const hasUpgrade = sendCorrection(deps, line, results, !timedOut, markedLanguages);
+      // `no_result` covers a `null` results — the prepared promise rejected,
+      // or the line was suppressed inside prepareTranslationsForPublish.
+      // `empty_result` is operationally the same "nothing came back" outcome
+      // but reached a different way: translateWithFallback swallowed both
+      // attempts and resolved to `{}`, so prepareTranslationsForPublish
+      // returned `[]` rather than `null`. Kept distinct from `no_result`
+      // (rather than folded together) because they're diagnostically
+      // different for an operator tuning MAX_CORRECTION_LAG_MS — a rejected
+      // promise/suppressed line points at session or admin state, while an
+      // empty result points at the translation provider itself.
       const settleReason = hasUpgrade
         ? undefined
         : timedOut
           ? 'window_expired'
           : results === null
             ? 'no_result'
-            : 'not_an_improvement';
+            : results.length === 0
+              ? 'empty_result'
+              : 'not_an_improvement';
       void logEvent('info', {
         event: 'caption_corrected',
         outcome: hasUpgrade ? 'upgrade' : 'settle',
         ...(settleReason ? { reason: settleReason } : {}),
+        id: line.id,
+        english: line.english,
         lagMs: Date.now() - shedAt,
       });
-
-      sendCorrection(deps, line, results, !timedOut, markedLanguages);
 
       if (timedOut) {
         // The translation may still land after the window closed (or never,
