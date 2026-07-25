@@ -83,6 +83,7 @@ export interface WsServerDeps {
   deepgramCostFlushIntervalMs: number;
   viewerBacklogTranslateLimit: number;
   maxPublishLagMs: number;
+  maxCorrectionLagMs: number;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
@@ -131,6 +132,15 @@ interface Publisher {
 
 const DEADLINE_REACHED = Symbol('deadline-reached');
 
+// What raceAgainstDeadline decided, not just what it produced. `shedAt` is the
+// moment the deadline fired (and therefore the clock the correction window is
+// measured from), or null when the translation won the race and no correction
+// is owed.
+interface DeadlineOutcome {
+  results: PreparedLanguageResult[] | null;
+  shedAt: number | null;
+}
+
 // Publish the line's already-verified English text for every active language.
 // Mirrors prepareTranslationsForPublish's guards so a line suppressed
 // (admin-removed) mid-flight is still never published. English is always safe:
@@ -151,7 +161,7 @@ async function raceAgainstDeadline(
   deadlineMs: number,
   line: CaptionLine,
   deps: WsServerDeps
-): Promise<PreparedLanguageResult[] | null> {
+): Promise<DeadlineOutcome> {
   // Attach a handler immediately so a rejection is never left unhandled,
   // regardless of which branch below runs (the early-return path never
   // otherwise touches preparedPromise).
@@ -160,7 +170,7 @@ async function raceAgainstDeadline(
   const remaining = deadlineMs - Date.now();
   if (remaining <= 0) {
     void logEvent('warn', { event: 'caption_lag_shed', reason: 'publish_deadline', english: line.english });
-    return englishFallbackResults(line, deps);
+    return { results: englishFallbackResults(line, deps), shedAt: Date.now() };
   }
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<typeof DEADLINE_REACHED>((resolve) => {
@@ -170,9 +180,9 @@ async function raceAgainstDeadline(
     const outcome = await Promise.race([preparedPromise, timeout]);
     if (outcome === DEADLINE_REACHED) {
       void logEvent('warn', { event: 'caption_lag_shed', reason: 'publish_deadline', english: line.english });
-      return englishFallbackResults(line, deps);
+      return { results: englishFallbackResults(line, deps), shedAt: Date.now() };
     }
-    return outcome;
+    return { results: outcome, shedAt: null };
   } finally {
     clearTimeout(timer!);
   }
@@ -220,28 +230,33 @@ function createEnqueuePublish(deps: WsServerDeps): Publisher {
   function enqueueOrderedSend(
     line: CaptionLine,
     enqueuedAt: number,
-    resultsPromise: Promise<PreparedLanguageResult[] | null>,
+    outcomePromise: Promise<DeadlineOutcome>,
     viewerMessageType: 'caption' | 'caption-inserted'
-  ): void {
+  ): Promise<void> {
     const tracker = deps.session.liveLag;
     tracker.enqueue(enqueuedAt);
-    deps.session.publishQueue = deps.session.publishQueue.then(async () => {
-      let results: PreparedLanguageResult[] | null;
+    const sendPromise = deps.session.publishQueue.then(async () => {
+      let outcome: DeadlineOutcome;
       try {
-        results = await resultsPromise;
+        outcome = await outcomePromise;
       } catch (error) {
         void logEvent('error', {
           event: 'publish_failed',
           english: line.english,
           error: error instanceof Error ? error.message : String(error),
         });
-        results = null;
+        outcome = { results: null, shedAt: null };
       } finally {
         tracker.dequeue();
       }
-      sendPrepared(line, results, deps, viewerMessageType);
+      // Tell the viewer a correction may follow only when one is actually owed:
+      // the line was shed at the deadline AND corrections are enabled.
+      const awaitingCorrection = outcome.shedAt !== null && deps.maxCorrectionLagMs > 0;
+      sendPrepared(line, outcome.results, deps, viewerMessageType, awaitingCorrection);
       reportLag(deps, deps.session.liveLag.lagMs(Date.now()));
     });
+    deps.session.publishQueue = sendPromise;
+    return sendPromise;
   }
 
   const enqueuePublish: EnqueuePublish = (line, workPromise, viewerMessageType = 'caption') => {
@@ -250,12 +265,17 @@ function createEnqueuePublish(deps: WsServerDeps): Publisher {
     const preparedPromise = workPromise.then((translations) =>
       prepareTranslationsForPublish(line, translations, deps)
     );
-    const resultsPromise = raceAgainstDeadline(preparedPromise, enqueuedAt + deps.maxPublishLagMs, line, deps);
-    enqueueOrderedSend(line, enqueuedAt, resultsPromise, viewerMessageType);
+    const outcomePromise = raceAgainstDeadline(preparedPromise, enqueuedAt + deps.maxPublishLagMs, line, deps);
+    enqueueOrderedSend(line, enqueuedAt, outcomePromise, viewerMessageType);
   };
 
   const publishEnglish = (line: CaptionLine, viewerMessageType: 'caption' | 'caption-inserted' = 'caption'): void => {
-    enqueueOrderedSend(line, Date.now(), Promise.resolve(englishFallbackResults(line, deps)), viewerMessageType);
+    enqueueOrderedSend(
+      line,
+      Date.now(),
+      Promise.resolve({ results: englishFallbackResults(line, deps), shedAt: null }),
+      viewerMessageType
+    );
   };
 
   return { enqueuePublish, publishEnglish };
@@ -632,7 +652,8 @@ function sendPrepared(
   line: CaptionLine,
   results: PreparedLanguageResult[] | null,
   deps: WsServerDeps,
-  viewerMessageType: 'caption' | 'caption-inserted'
+  viewerMessageType: 'caption' | 'caption-inserted',
+  awaitingCorrection = false
 ): void {
   if (results === null) return;
 
@@ -649,6 +670,7 @@ function sendPrepared(
       english: line.english,
       translated,
       ...(flagged ? { flagged: true, reason } : {}),
+      ...(awaitingCorrection ? { awaitingCorrection: true } : {}),
     });
     for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
       viewerSocket.send(payload);
