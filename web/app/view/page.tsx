@@ -253,6 +253,7 @@ function ViewerPageContent() {
           return (
             <div
               key={line.id}
+              aria-busy={awaiting}
               className={`flex items-start gap-2 hover:bg-accent/50 p-2 pl-3 rounded-md border-l-2 transition-colors ${
                 awaiting ? 'border-amber-500' : 'border-transparent'
               }`}
@@ -260,7 +261,7 @@ function ViewerPageContent() {
               <div className="flex-1 min-w-0">
                 {!awaiting && <p className="text-sm text-muted-foreground">{line.english}</p>}
                 <p
-                  className={`transition-all duration-500 ${
+                  className={`transition-colors duration-500 ${
                     awaiting ? 'text-lg sm:text-xl' : 'text-xl sm:text-2xl'
                   } ${!awaiting && line.flagged ? 'text-rose-400' : ''}`}
                 >

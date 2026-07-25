@@ -276,7 +276,17 @@ function createEnqueuePublish(deps: WsServerDeps): Publisher {
       void outcomePromise
         .then((outcome) => {
           if (outcome.shedAt === null) return;
-          scheduleCorrection(deps, line, preparedPromise, outcome.shedAt, sendPromise);
+          // outcome.results is exactly what sendPrepared marked as
+          // awaitingCorrection (englishFallbackResults' language set at shed
+          // time) — snapshot it now rather than re-deriving the language set
+          // later from the late translation results, which can cover a
+          // different set of languages (see sendCorrection). When results is
+          // null the line was already suppressed at shed time, so
+          // sendPrepared sent nothing and marked no one: there is nothing to
+          // correct.
+          if (outcome.results === null) return;
+          const markedLanguages = outcome.results.map((result) => result.language);
+          scheduleCorrection(deps, line, preparedPromise, outcome.shedAt, sendPromise, markedLanguages, line.english);
         })
         .catch(() => {});
     }
@@ -715,21 +725,26 @@ function cacheCorrectedTranslations(deps: WsServerDeps, line: CaptionLine, resul
 // their backlog — while the window governs only whether text is rewritten on a
 // screen someone is currently reading. A message with no `translated` means
 // "settle": clear the waiting state, leave the text alone.
+//
+// Iterates `markedLanguages` — the shed-time snapshot of exactly which
+// languages were told `awaitingCorrection: true` — rather than re-deriving
+// the set from the late `results`. Those two sets can differ: a viewer may
+// join a new language during the deadline window (marked but absent from
+// results, which only cover languages active at ingest), or the translation
+// can fail outright (`results === []`, which is truthy but empty). Iterating
+// the late results directly would strand the former and message nobody for
+// the latter — every marked viewer is owed a terminal message regardless of
+// what the late results contain.
 function sendCorrection(
   deps: WsServerDeps,
   line: CaptionLine,
   results: PreparedLanguageResult[] | null,
-  withinWindow: boolean
+  withinWindow: boolean,
+  markedLanguages: string[]
 ): void {
-  // With no results (the translation ultimately failed, or hadn't arrived by
-  // the time the correction window closed) there is nothing to cache and
-  // nothing to upgrade, but every viewer still needs its waiting state
-  // cleared — so settle each currently-active language.
-  const languages = results ? results.map((result) => result.language) : deps.session.getActiveLanguages();
-
   if (results) cacheCorrectedTranslations(deps, line, results);
 
-  for (const language of languages) {
+  for (const language of markedLanguages) {
     const result = results?.find((entry) => entry.language === language);
 
     // Only rewrite the viewer's text when there is genuinely something new to
@@ -769,12 +784,24 @@ function sendCorrection(
 // caption — because the translation can resolve while that link is still
 // queued behind other work, and a correction that overtook its own caption
 // would patch a line the viewer does not have yet.
+//
+// `markedLanguages` is the shed-time snapshot of which languages were told
+// `awaitingCorrection: true` (see sendCorrection). `shedEnglish` is the
+// line's English text at that same moment: `TranscriptBuffer.reinstate`
+// mutates the same CaptionLine object in place, so an admin who removes and
+// then reinstates this line *with edited text* while a correction is still
+// in flight leaves `line.suppressed === false` again — the suppressed guard
+// below would miss that. Comparing the live `line.english` against the
+// snapshot catches it: a stale correction must never overwrite an
+// operator's edit.
 function scheduleCorrection(
   deps: WsServerDeps,
   line: CaptionLine,
   preparedPromise: Promise<PreparedLanguageResult[] | null>,
   shedAt: number,
-  sendPromise: Promise<void>
+  sendPromise: Promise<void>,
+  markedLanguages: string[],
+  shedEnglish: string
 ): void {
   const sessionId = deps.session.id;
   void (async () => {
@@ -812,29 +839,57 @@ function scheduleCorrection(
       // Admin-removed while the translation was in flight — the viewer already
       // got line-removed, so there is no line left to correct.
       if (line.suppressed) return;
+      // Admin removed *and reinstated with different text* while the
+      // translation was in flight — line.suppressed is false again (same
+      // mutated object), but the English this translation corresponds to no
+      // longer matches what's on screen. Sending it would silently overwrite
+      // the operator's edit.
+      if (line.english !== shedEnglish) return;
 
-      sendCorrection(deps, line, results, !timedOut);
+      const hasUpgrade = !timedOut && results !== null && results.some((result) => result.translated !== line.english);
+      const settleReason = hasUpgrade
+        ? undefined
+        : timedOut
+          ? 'window_expired'
+          : results === null
+            ? 'no_result'
+            : 'not_an_improvement';
+      void logEvent('info', {
+        event: 'caption_corrected',
+        outcome: hasUpgrade ? 'upgrade' : 'settle',
+        ...(settleReason ? { reason: settleReason } : {}),
+        lagMs: Date.now() - shedAt,
+      });
+
+      sendCorrection(deps, line, results, !timedOut, markedLanguages);
 
       if (timedOut) {
         // The translation may still land after the window closed (or never,
         // if it truly hung or failed outright) — cache it for future
         // subscribers if and when it does, re-checking the same guards at
-        // that later point since a session restart or admin removal could
-        // happen in the meantime too.
+        // that later point since a session restart, admin removal, or
+        // admin edit could happen in the meantime too.
         void preparedPromise
           .then((lateResults) => {
             if (deps.session.id !== sessionId) return;
             if (line.suppressed) return;
+            if (line.english !== shedEnglish) return;
             if (lateResults) cacheCorrectedTranslations(deps, line, lateResults);
           })
           .catch(() => {});
       }
-    } catch {
+    } catch (error) {
       // sendPromise is not expected to reject here — ws's send() only throws
       // synchronously for a CONNECTING socket, and viewers are only
-      // registered once OPEN — but every other promise in this file is
-      // guarded against an unhandled rejection on principle, and this one is
-      // no exception.
+      // registered once OPEN. It is also session.publishQueue itself, so an
+      // unexpected throw here would otherwise silently kill every subsequent
+      // line's correction with no trace — hence the log rather than a bare
+      // swallow.
+      void logEvent('error', {
+        event: 'correction_failed',
+        english: line.english,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   })();
 }
