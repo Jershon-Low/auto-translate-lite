@@ -111,7 +111,7 @@ export async function deleteRoleCaches(client: GeminiClient, caches: RoleCaches)
   );
   await Promise.all(
     refs.map((ref) =>
-      client.caches.delete({ name: ref.name }).catch((error) => {
+      Promise.resolve(client.caches.delete({ name: ref.name })).catch((error) => {
         void logEvent('error', {
           event: 'role_cache_delete_failed',
           error: error instanceof Error ? error.message : String(error),

@@ -38,6 +38,17 @@ function isCacheRelatedError(error: unknown): boolean {
   return /cache/i.test(message);
 }
 
+// The 'stop' message handler and the socket 'close' handler can both fire for
+// the same session (e.g. a client sends 'stop' then immediately closes).
+// Swapping session.roleCaches out for the empty value synchronously, before
+// deletion starts, makes this atomic: whichever handler runs first claims the
+// refs, and the other sees the already-cleared value and deletes nothing.
+function clearAndDeleteRoleCaches(deps: WsServerDeps): Promise<void> {
+  const caches = deps.session.roleCaches;
+  deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
+  return deleteRoleCaches(deps.geminiClient, caches);
+}
+
 type EnqueuePublish = (
   line: CaptionLine,
   workPromise: Promise<Record<string, string>>,
@@ -404,8 +415,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
               avgBytesPerChunk: audioChunkCount > 0 ? Math.round(audioByteCount / audioChunkCount) : 0,
             });
             deps.session.stop();
-            await deleteRoleCaches(deps.geminiClient, deps.session.roleCaches);
-            deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
+            await clearAndDeleteRoleCaches(deps);
             deepgramConnection?.finish();
             deepgramConnection = null;
             resetAudioBuffering();
@@ -450,9 +460,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
     });
     if (deps.session.captureSocket === ws) deps.session.captureSocket = null;
     deps.session.stop();
-    void deleteRoleCaches(deps.geminiClient, deps.session.roleCaches).then(() => {
-      deps.session.roleCaches = { transcriptionVerifier: null, translation: null, translationVerifier: null };
-    });
+    void clearAndDeleteRoleCaches(deps);
     deepgramConnection?.finish();
     resetAudioBuffering();
 

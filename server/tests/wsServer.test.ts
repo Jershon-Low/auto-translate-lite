@@ -785,6 +785,30 @@ describe('wsServer', () => {
       captureSocket.close();
     });
 
+    it('does not double-delete role caches when the stop handler and the socket close handler race', async () => {
+      (geminiClient.caches.delete as ReturnType<typeof vi.fn>).mockImplementation(
+        () => new Promise((resolve) => setTimeout(resolve, 50))
+      );
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      // Send 'stop' and close the socket back-to-back, without waiting for
+      // the 'stop' handler's deleteRoleCaches call to resolve. This races
+      // the 'stop' message handler against the socket 'close' handler —
+      // both historically read and deleted whatever refs were in
+      // session.roleCaches at the time, with no coordination between them.
+      captureSocket.send(JSON.stringify({ type: 'stop' }));
+      captureSocket.close();
+
+      await delay(150);
+
+      expect(geminiClient.caches.delete).toHaveBeenCalledTimes(3);
+      expect(session.roleCaches).toEqual({ transcriptionVerifier: null, translation: null, translationVerifier: null });
+    });
+
     it('rebuilds all three caches on a second start (reconnect)', async () => {
       const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
       await waitForOpen(captureSocket);
