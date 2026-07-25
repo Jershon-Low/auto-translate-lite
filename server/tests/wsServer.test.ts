@@ -186,6 +186,7 @@ describe('wsServer', () => {
       logHub,
       adminPasscode: 'test-passcode',
       deepgramCostFlushIntervalMs: 5000,
+      maxPublishLagMs: 60000,
     };
     attachWsServer(deps);
 
@@ -2723,6 +2724,98 @@ describe('wsServer', () => {
       const socket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
       await waitForOpen(socket);
       socket.close();
+    });
+  });
+
+  describe('live-queue back-pressure — publish deadline', () => {
+    it('publishes the English line when its translation misses the staleness deadline', async () => {
+      deps.maxPublishLagMs = 30;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((m) => m[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        // Translation is slower than the 30ms deadline.
+        return new Promise((resolve) => setTimeout(() => resolve({ text: '{"zh":"你好"}' }), 300));
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      // Past both the 30ms deadline and the 300ms slow translate: the deadline
+      // must have published English, and the late translation must be discarded
+      // (no second caption).
+      await delay(350);
+
+      const captions = messages.filter((m) => m.type === 'caption');
+      expect(captions).toEqual([
+        { type: 'caption', id: expect.any(String), english: 'Hello everyone', translated: 'Hello everyone' },
+      ]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('keeps caption order when deadline-shed English lines drain the queue', async () => {
+      deps.maxPublishLagMs = 30;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        if (params.contents.includes('safety checker')) {
+          const ids = [...params.contents.matchAll(/\[id: "([^"]+)"\]/g)].map((m) => m[1]);
+          const result: Record<string, { safe: boolean; reason: string }> = {};
+          for (const id of ids) result[id] = { safe: true, reason: 'ok' };
+          return Promise.resolve({ text: JSON.stringify(result) });
+        }
+        // Both lines translate slower than the deadline, so both are shed to English.
+        return new Promise((resolve) => setTimeout(() => resolve({ text: '{"zh":"译"}' }), 300));
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Line 1');
+      await waitForMessage(captureSocket); // Line 1 transcript ack
+      capturedCallbacks!.onFinalSegment('Line 2');
+      await waitForMessage(captureSocket); // Line 2 transcript ack
+
+      await delay(400);
+
+      const captions = messages.filter((m) => m.type === 'caption');
+      expect(captions).toEqual([
+        { type: 'caption', id: expect.any(String), english: 'Line 1', translated: 'Line 1' },
+        { type: 'caption', id: expect.any(String), english: 'Line 2', translated: 'Line 2' },
+      ]);
+
+      captureSocket.close();
+      viewerSocket.close();
     });
   });
 });

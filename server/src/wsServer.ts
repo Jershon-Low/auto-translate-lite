@@ -67,6 +67,7 @@ export interface WsServerDeps {
   adminPasscode: string | undefined;
   logHub: LogHub;
   deepgramCostFlushIntervalMs: number;
+  maxPublishLagMs: number;
 }
 
 export function attachWsServer(deps: WsServerDeps): void {
@@ -108,31 +109,102 @@ export function attachWsServer(deps: WsServerDeps): void {
   });
 }
 
-function createEnqueuePublish(deps: WsServerDeps): EnqueuePublish {
-  return function enqueuePublish(
+interface Publisher {
+  enqueuePublish: EnqueuePublish;
+  publishEnglish: (line: CaptionLine, viewerMessageType?: 'caption' | 'caption-inserted') => void;
+}
+
+const DEADLINE_REACHED = Symbol('deadline-reached');
+
+// Publish the line's already-verified English text for every active language.
+// Mirrors prepareTranslationsForPublish's guards so a line suppressed
+// (admin-removed) mid-flight is still never published. English is always safe:
+// the line has already passed the transcription safety check.
+function englishFallbackResults(line: CaptionLine, deps: WsServerDeps): PreparedLanguageResult[] | null {
+  if (line.suppressed) return null;
+  return deps.session
+    .getActiveLanguages()
+    .map((language) => ({ language, translated: line.english, flagged: false }));
+}
+
+// Resolve to the verified translation results if they arrive before the
+// staleness deadline; otherwise resolve to the English fallback and let the
+// (now-stale) translation be discarded. Bounds how far behind a caption can
+// fall to ~maxPublishLagMs.
+async function raceAgainstDeadline(
+  preparedPromise: Promise<PreparedLanguageResult[] | null>,
+  deadlineMs: number,
+  line: CaptionLine,
+  deps: WsServerDeps
+): Promise<PreparedLanguageResult[] | null> {
+  const remaining = deadlineMs - Date.now();
+  if (remaining <= 0) {
+    void logEvent('warn', { event: 'caption_lag_shed', reason: 'publish_deadline', english: line.english });
+    return englishFallbackResults(line, deps);
+  }
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<typeof DEADLINE_REACHED>((resolve) => {
+    timer = setTimeout(() => resolve(DEADLINE_REACHED), remaining);
+  });
+  try {
+    const outcome = await Promise.race([preparedPromise, timeout]);
+    if (outcome === DEADLINE_REACHED) {
+      void logEvent('warn', { event: 'caption_lag_shed', reason: 'publish_deadline', english: line.english });
+      return englishFallbackResults(line, deps);
+    }
+    return outcome;
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+function createEnqueuePublish(deps: WsServerDeps): Publisher {
+  // Shared tail: record the line in the lag tracker, then append one ordered
+  // link to publishQueue that sends the pre-computed results in order and
+  // dequeues afterward. Capturing `tracker` here (not re-reading it inside the
+  // async link) keeps enqueue and dequeue on the same instance even if the
+  // session restarts mid-flight.
+  function enqueueOrderedSend(
     line: CaptionLine,
-    workPromise: Promise<Record<string, string>>,
-    viewerMessageType: 'caption' | 'caption-inserted' = 'caption'
+    enqueuedAt: number,
+    resultsPromise: Promise<PreparedLanguageResult[] | null>,
+    viewerMessageType: 'caption' | 'caption-inserted'
   ): void {
-    // Translate + verify for this line starts immediately (not gated on the
-    // queue below), so a slow line doesn't stall the network work for lines
-    // behind it — only the final, already-computed send is kept in order.
-    const preparedPromise = workPromise
-      .then((translations) => prepareTranslationsForPublish(line, translations, deps))
-      .catch((error) => {
+    const tracker = deps.session.liveLag;
+    tracker.enqueue(enqueuedAt);
+    deps.session.publishQueue = deps.session.publishQueue.then(async () => {
+      let results: PreparedLanguageResult[] | null;
+      try {
+        results = await resultsPromise;
+      } catch (error) {
         void logEvent('error', {
           event: 'publish_failed',
           english: line.english,
           error: error instanceof Error ? error.message : String(error),
         });
-        return null;
-      });
-
-    deps.session.publishQueue = deps.session.publishQueue.then(async () => {
-      const results = await preparedPromise;
+        results = null;
+      } finally {
+        tracker.dequeue();
+      }
       sendPrepared(line, results, deps, viewerMessageType);
     });
+  }
+
+  const enqueuePublish: EnqueuePublish = (line, workPromise, viewerMessageType = 'caption') => {
+    const enqueuedAt = Date.now();
+    // Translate + verify still starts immediately (not gated on the queue), as before.
+    const preparedPromise = workPromise.then((translations) =>
+      prepareTranslationsForPublish(line, translations, deps)
+    );
+    const resultsPromise = raceAgainstDeadline(preparedPromise, enqueuedAt + deps.maxPublishLagMs, line, deps);
+    enqueueOrderedSend(line, enqueuedAt, resultsPromise, viewerMessageType);
   };
+
+  const publishEnglish = (line: CaptionLine, viewerMessageType: 'caption' | 'caption-inserted' = 'caption'): void => {
+    enqueueOrderedSend(line, Date.now(), Promise.resolve(englishFallbackResults(line, deps)), viewerMessageType);
+  };
+
+  return { enqueuePublish, publishEnglish };
 }
 
 function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
@@ -207,7 +279,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
     });
   }
 
-  const enqueuePublish = createEnqueuePublish(deps);
+  const { enqueuePublish } = createEnqueuePublish(deps);
 
   ws.on('message', (data, isBinary) => {
     void (async () => {
@@ -364,7 +436,7 @@ function buildReviewBacklogLine(line: CaptionLine): Record<string, unknown> {
 }
 
 function handleReviewConnection(ws: WebSocket, deps: WsServerDeps): void {
-  const enqueuePublish = createEnqueuePublish(deps);
+  const { enqueuePublish } = createEnqueuePublish(deps);
 
   ws.send(
     JSON.stringify({

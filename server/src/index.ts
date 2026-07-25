@@ -97,6 +97,7 @@ attachWsServer({
   adminPasscode: process.env.ADMIN_PASSCODE,
   logHub,
   deepgramCostFlushIntervalMs: 5000,
+  maxPublishLagMs: process.env.MAX_PUBLISH_LAG_MS ? Number(process.env.MAX_PUBLISH_LAG_MS) : 8000,
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;
