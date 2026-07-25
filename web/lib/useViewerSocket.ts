@@ -10,6 +10,7 @@ export interface CaptionLine {
   flagged?: boolean;
   reason?: string;
   pending?: boolean;
+  awaitingCorrection?: boolean;
 }
 
 export type ViewerStatus = 'connecting' | 'reconnecting' | 'live';
@@ -51,10 +52,37 @@ export function useViewerSocket(language: string, wsUrl: string) {
               english: message.english,
               translated: message.translated,
               ...(message.flagged ? { flagged: true, reason: message.reason } : {}),
+              ...(message.awaitingCorrection ? { awaitingCorrection: true } : {}),
             };
             if (index === -1) return [...previous, resolved];
             const next = [...previous];
             next[index] = resolved;
+            return next;
+          });
+          setStatus('live');
+        } else if (message.type === 'caption-corrected') {
+          setLines((previous) => {
+            const index = previous.findIndex((line) => line.id === message.id);
+            // Unlike 'caption', never append: correcting a line this viewer
+            // doesn't have is meaningless, and appending would invent a line
+            // out of order.
+            if (index === -1) return previous;
+            const next = [...previous];
+            const existing = next[index];
+            // A correction with no `translated` is a settle: clear the waiting
+            // state, keep the text that's already on screen.
+            next[index] = {
+              ...existing,
+              awaitingCorrection: false,
+              ...(message.translated !== undefined
+                ? {
+                    translated: message.translated,
+                    ...(message.flagged
+                      ? { flagged: true, reason: message.reason }
+                      : { flagged: false, reason: undefined }),
+                  }
+                : {}),
+            };
             return next;
           });
           setStatus('live');
