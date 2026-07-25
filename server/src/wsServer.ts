@@ -137,6 +137,11 @@ async function raceAgainstDeadline(
   line: CaptionLine,
   deps: WsServerDeps
 ): Promise<PreparedLanguageResult[] | null> {
+  // Attach a handler immediately so a rejection is never left unhandled,
+  // regardless of which branch below runs (the early-return path never
+  // otherwise touches preparedPromise).
+  void preparedPromise.catch(() => {});
+
   const remaining = deadlineMs - Date.now();
   if (remaining <= 0) {
     void logEvent('warn', { event: 'caption_lag_shed', reason: 'publish_deadline', english: line.english });
