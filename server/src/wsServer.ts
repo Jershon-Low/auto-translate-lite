@@ -266,7 +266,20 @@ function createEnqueuePublish(deps: WsServerDeps): Publisher {
       prepareTranslationsForPublish(line, translations, deps)
     );
     const outcomePromise = raceAgainstDeadline(preparedPromise, enqueuedAt + deps.maxPublishLagMs, line, deps);
-    enqueueOrderedSend(line, enqueuedAt, outcomePromise, viewerMessageType);
+    const sendPromise = enqueueOrderedSend(line, enqueuedAt, outcomePromise, viewerMessageType);
+
+    if (deps.maxCorrectionLagMs > 0) {
+      // .catch is required, not optional: outcomePromise rejects when
+      // preparedPromise rejects before the deadline, and this is a second
+      // subscription to it — without the catch that rejection is unhandled on
+      // this branch even though enqueueOrderedSend handles its own.
+      void outcomePromise
+        .then((outcome) => {
+          if (outcome.shedAt === null) return;
+          scheduleCorrection(deps, line, preparedPromise, outcome.shedAt, sendPromise);
+        })
+        .catch(() => {});
+    }
   };
 
   const publishEnglish = (line: CaptionLine, viewerMessageType: 'caption' | 'caption-inserted' = 'caption'): void => {
@@ -676,6 +689,93 @@ function sendPrepared(
       viewerSocket.send(payload);
     }
   }
+}
+
+// Delivers the single terminal message a deadline-shed line is owed. The cache
+// is written regardless of the correction window — a viewer who joins,
+// reconnects, or switches language later should get the real translation from
+// their backlog — while the window governs only whether text is rewritten on a
+// screen someone is currently reading. A message with no `translated` means
+// "settle": clear the waiting state, leave the text alone.
+function sendCorrection(
+  deps: WsServerDeps,
+  line: CaptionLine,
+  results: PreparedLanguageResult[] | null,
+  withinWindow: boolean
+): void {
+  // With no results (the translation ultimately failed) there is nothing to
+  // cache and nothing to upgrade, but every viewer still needs its waiting
+  // state cleared — so settle each currently-active language.
+  const languages = results ? results.map((result) => result.language) : deps.session.getActiveLanguages();
+
+  for (const language of languages) {
+    const result = results?.find((entry) => entry.language === language);
+
+    if (result) {
+      deps.session.translationCache.set(
+        language,
+        line.id,
+        result.flagged
+          ? { translated: result.translated, flagged: true, reason: result.reason! }
+          : { translated: result.translated, flagged: false }
+      );
+    }
+
+    // Only rewrite the viewer's text when there is genuinely something new to
+    // show. A verification failure makes prepareTranslationsForPublish fall
+    // back to the English we already published, which is a settle, not an
+    // upgrade.
+    const isUpgrade = result !== undefined && withinWindow && result.translated !== line.english;
+    const payload = JSON.stringify({
+      type: 'caption-corrected',
+      id: line.id,
+      ...(isUpgrade
+        ? {
+            translated: result.translated,
+            ...(result.flagged ? { flagged: true, reason: result.reason } : {}),
+          }
+        : {}),
+    });
+    for (const viewerSocket of deps.session.getViewersForLanguage(language)) {
+      viewerSocket.send(payload);
+    }
+  }
+}
+
+// Waits for the retained translation and delivers the line's terminal message.
+// Gated on `sendPromise` — the ordered-send link for this line's own English
+// caption — because the translation can resolve while that link is still
+// queued behind other work, and a correction that overtook its own caption
+// would patch a line the viewer does not have yet.
+function scheduleCorrection(
+  deps: WsServerDeps,
+  line: CaptionLine,
+  preparedPromise: Promise<PreparedLanguageResult[] | null>,
+  shedAt: number,
+  sendPromise: Promise<void>
+): void {
+  const sessionId = deps.session.id;
+  void (async () => {
+    await sendPromise;
+
+    let results: PreparedLanguageResult[] | null;
+    try {
+      results = await preparedPromise;
+    } catch {
+      // Translation/verification ultimately failed. Still settle, so the line
+      // does not stay marked as still-working forever.
+      results = null;
+    }
+
+    // A correction from a previous session must never patch a line in a new
+    // one; Session.start() assigns a fresh id.
+    if (deps.session.id !== sessionId) return;
+    // Admin-removed while the translation was in flight — the viewer already
+    // got line-removed, so there is no line left to correct.
+    if (line.suppressed) return;
+
+    sendCorrection(deps, line, results, Date.now() - shedAt <= deps.maxCorrectionLagMs);
+  })();
 }
 
 function buildReinstateTranslation(
