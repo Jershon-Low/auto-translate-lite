@@ -691,6 +691,24 @@ function sendPrepared(
   }
 }
 
+// Writes the retained per-language translations into the cache, independent
+// of whether the correction window is still open — a viewer who joins,
+// reconnects, or switches language later should get the real translation from
+// their backlog even after the live window has lapsed. Shared by
+// sendCorrection's on-time path and scheduleCorrection's timed-out-but-
+// eventually-arrived path below.
+function cacheCorrectedTranslations(deps: WsServerDeps, line: CaptionLine, results: PreparedLanguageResult[]): void {
+  for (const result of results) {
+    deps.session.translationCache.set(
+      result.language,
+      line.id,
+      result.flagged
+        ? { translated: result.translated, flagged: true, reason: result.reason! }
+        : { translated: result.translated, flagged: false }
+    );
+  }
+}
+
 // Delivers the single terminal message a deadline-shed line is owed. The cache
 // is written regardless of the correction window — a viewer who joins,
 // reconnects, or switches language later should get the real translation from
@@ -703,23 +721,16 @@ function sendCorrection(
   results: PreparedLanguageResult[] | null,
   withinWindow: boolean
 ): void {
-  // With no results (the translation ultimately failed) there is nothing to
-  // cache and nothing to upgrade, but every viewer still needs its waiting
-  // state cleared — so settle each currently-active language.
+  // With no results (the translation ultimately failed, or hadn't arrived by
+  // the time the correction window closed) there is nothing to cache and
+  // nothing to upgrade, but every viewer still needs its waiting state
+  // cleared — so settle each currently-active language.
   const languages = results ? results.map((result) => result.language) : deps.session.getActiveLanguages();
+
+  if (results) cacheCorrectedTranslations(deps, line, results);
 
   for (const language of languages) {
     const result = results?.find((entry) => entry.language === language);
-
-    if (result) {
-      deps.session.translationCache.set(
-        language,
-        line.id,
-        result.flagged
-          ? { translated: result.translated, flagged: true, reason: result.reason! }
-          : { translated: result.translated, flagged: false }
-      );
-    }
 
     // Only rewrite the viewer's text when there is genuinely something new to
     // show. A verification failure makes prepareTranslationsForPublish fall
@@ -742,7 +753,18 @@ function sendCorrection(
   }
 }
 
-// Waits for the retained translation and delivers the line's terminal message.
+// Waits for the retained translation and delivers the line's terminal
+// message — but never waits past the correction window itself. Nothing in
+// the translate+verify chain (raceAgainstDeadline included) ever cancels or
+// times out the underlying LLM calls; raceAgainstDeadline only decides what
+// to *publish* at the deadline. So an LLM call that hangs outright, rather
+// than erroring, must not leave a viewer's waiting state stuck forever.
+// Racing `preparedPromise` against the *remaining* window (from `shedAt`)
+// guarantees exactly one terminal message even then. If the translation
+// lands after the settle already went out, it is still cached — never pushed
+// live — for future subscribers, per sendCorrection's cache-is-unconditional
+// rule above.
+//
 // Gated on `sendPromise` — the ordered-send link for this line's own English
 // caption — because the translation can resolve while that link is still
 // queued behind other work, and a correction that overtook its own caption
@@ -756,25 +778,64 @@ function scheduleCorrection(
 ): void {
   const sessionId = deps.session.id;
   void (async () => {
-    await sendPromise;
-
-    let results: PreparedLanguageResult[] | null;
     try {
-      results = await preparedPromise;
+      await sendPromise;
+
+      const remaining = deps.maxCorrectionLagMs - (Date.now() - shedAt);
+      let results: PreparedLanguageResult[] | null;
+      let timedOut: boolean;
+
+      if (remaining <= 0) {
+        results = null;
+        timedOut = true;
+      } else {
+        let timer: ReturnType<typeof setTimeout>;
+        const timeout = new Promise<typeof DEADLINE_REACHED>((resolve) => {
+          timer = setTimeout(() => resolve(DEADLINE_REACHED), remaining);
+        });
+        try {
+          // Neutralize a preparedPromise rejection into the race itself
+          // (rather than a separate unguarded subscription) so a failed
+          // translate/verify still settles instead of leaving this branch's
+          // rejection unhandled.
+          const outcome = await Promise.race([preparedPromise.catch(() => null), timeout]);
+          timedOut = outcome === DEADLINE_REACHED;
+          results = outcome === DEADLINE_REACHED ? null : outcome;
+        } finally {
+          clearTimeout(timer!);
+        }
+      }
+
+      // A correction from a previous session must never patch a line in a new
+      // one; Session.start() assigns a fresh id.
+      if (deps.session.id !== sessionId) return;
+      // Admin-removed while the translation was in flight — the viewer already
+      // got line-removed, so there is no line left to correct.
+      if (line.suppressed) return;
+
+      sendCorrection(deps, line, results, !timedOut);
+
+      if (timedOut) {
+        // The translation may still land after the window closed (or never,
+        // if it truly hung or failed outright) — cache it for future
+        // subscribers if and when it does, re-checking the same guards at
+        // that later point since a session restart or admin removal could
+        // happen in the meantime too.
+        void preparedPromise
+          .then((lateResults) => {
+            if (deps.session.id !== sessionId) return;
+            if (line.suppressed) return;
+            if (lateResults) cacheCorrectedTranslations(deps, line, lateResults);
+          })
+          .catch(() => {});
+      }
     } catch {
-      // Translation/verification ultimately failed. Still settle, so the line
-      // does not stay marked as still-working forever.
-      results = null;
+      // sendPromise is not expected to reject here — ws's send() only throws
+      // synchronously for a CONNECTING socket, and viewers are only
+      // registered once OPEN — but every other promise in this file is
+      // guarded against an unhandled rejection on principle, and this one is
+      // no exception.
     }
-
-    // A correction from a previous session must never patch a line in a new
-    // one; Session.start() assigns a fresh id.
-    if (deps.session.id !== sessionId) return;
-    // Admin-removed while the translation was in flight — the viewer already
-    // got line-removed, so there is no line left to correct.
-    if (line.suppressed) return;
-
-    sendCorrection(deps, line, results, Date.now() - shedAt <= deps.maxCorrectionLagMs);
   })();
 }
 

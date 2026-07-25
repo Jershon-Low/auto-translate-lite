@@ -3359,5 +3359,37 @@ describe('wsServer', () => {
       captureSocket.close();
       viewerSocket.close();
     });
+
+    it('settles a hung translation once the correction window itself expires', async () => {
+      deps.maxPublishLagMs = 30;
+      deps.maxCorrectionLagMs = 50;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+        }
+        // The translate call itself hangs forever — never resolves, never
+        // rejects — simulating an LLM call that stalls on the network rather
+        // than erroring. Nothing in the translate/verify chain has a
+        // timeout, so only scheduleCorrection's own window-bound race can
+        // rescue the viewer from waiting on this line indefinitely.
+        return new Promise(() => {});
+      });
+
+      const { captureSocket, viewerSocket, messages } = await startSessionWithViewer();
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await delay(400);
+
+      const caption = messages.find((m) => m.type === 'caption');
+      expect(caption).toMatchObject({ translated: 'Hello everyone', awaitingCorrection: true });
+
+      // Exactly one terminal message, carrying no replacement text — the
+      // translation never arrived, so there is nothing to upgrade with.
+      expect(messages.filter((m) => m.type === 'caption-corrected')).toEqual([
+        { type: 'caption-corrected', id: caption.id },
+      ]);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
   });
 });
