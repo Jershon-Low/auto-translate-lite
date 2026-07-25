@@ -2818,4 +2818,82 @@ describe('wsServer', () => {
       viewerSocket.close();
     });
   });
+
+  describe('live-queue back-pressure — ingest load shed', () => {
+    it('sheds translation for a newly ingested line when the pipeline is behind', async () => {
+      deps.maxPublishLagMs = 8000;
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      // Simulate a standing publish backlog: an entry that has been waiting 20s,
+      // so lagMs (~20000) is over the 8000ms threshold at the next ingest.
+      session.liveLag.enqueue(Date.now() - 20000);
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      capturedCallbacks!.onFinalSegment('Behind line');
+      await delay(50);
+
+      // The viewer gets English, and no translate call was made for this line.
+      const captions = messages.filter((m) => m.type === 'caption');
+      expect(captions).toEqual([
+        { type: 'caption', id: expect.any(String), english: 'Behind line', translated: 'Behind line' },
+      ]);
+      const translateCalls = (geminiClient.models.generateContent as any).mock.calls.filter(isTranslateCall);
+      expect(translateCalls.some((c: any) => c[0].contents.includes('Behind line'))).toBe(false);
+
+      captureSocket.close();
+      viewerSocket.close();
+    });
+
+    it('still suppresses a flagged transcription even when the pipeline is behind', async () => {
+      deps.maxPublishLagMs = 8000;
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker')) {
+          return Promise.resolve({ text: '{"safe":false,"reason":"likely mis-heard negation"}' });
+        }
+        return Promise.resolve({ text: '{"zh":"你好"}' });
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      // Even deeply behind, a flagged transcription must never reach viewers.
+      session.liveLag.enqueue(Date.now() - 20000);
+
+      const messages: any[] = [];
+      viewerSocket.on('message', (data) => messages.push(JSON.parse(data.toString())));
+
+      const transcriptPromise = waitForMessage(captureSocket);
+      capturedCallbacks!.onFinalSegment('Jesus is not the son of God');
+      const transcript = await transcriptPromise;
+      expect(transcript).toMatchObject({ flagged: true });
+
+      await delay(50);
+      // Only a line-removed — never a caption — reaches the viewer.
+      expect(messages).toEqual([{ type: 'line-removed', id: transcript.id }]);
+      expect(session.buffer.getRecent()[0]).toMatchObject({ id: transcript.id, suppressed: true });
+
+      warnSpy.mockRestore();
+      captureSocket.close();
+      viewerSocket.close();
+    });
+  });
 });

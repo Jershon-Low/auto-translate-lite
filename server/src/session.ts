@@ -27,6 +27,8 @@ export class Session {
   ingestQueue: Promise<void> = Promise.resolve();
   publishQueue: Promise<void> = Promise.resolve();
   liveLag: LiveLagTracker = new LiveLagTracker();
+  isBehind: boolean = false;
+  ingestLagHigh: boolean = false;
   private viewers: Map<WebSocket, string> = new Map();
   private reviewSockets: Set<WebSocket> = new Set();
 
@@ -42,6 +44,8 @@ export class Session {
     this.ingestQueue = Promise.resolve();
     this.publishQueue = Promise.resolve();
     this.liveLag = new LiveLagTracker();
+    this.isBehind = false;
+    this.ingestLagHigh = false;
   }
 
   stop(): void {

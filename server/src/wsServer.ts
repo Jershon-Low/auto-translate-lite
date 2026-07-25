@@ -163,6 +163,34 @@ async function raceAgainstDeadline(
   }
 }
 
+// Edge-triggered so a long congested stretch produces one "engaged" log and one
+// "disengaged" log, not one per line. Publish-path lag: how far behind the
+// oldest un-published line is.
+function reportLag(deps: WsServerDeps, lagMs: number): void {
+  const behind = lagMs >= deps.maxPublishLagMs;
+  if (behind && !deps.session.isBehind) {
+    deps.session.isBehind = true;
+    void logEvent('warn', { event: 'caption_backpressure_engaged', lagMs: Math.round(lagMs) });
+  } else if (!behind && deps.session.isBehind) {
+    deps.session.isBehind = false;
+    void logEvent('info', { event: 'caption_backpressure_disengaged', lagMs: Math.round(lagMs) });
+  }
+}
+
+// Ingest-path lag: how long a segment waited in the (un-sheddable) ingest queue
+// before processing began. Measured only — surfaces a slow transcription
+// verifier that back-pressure cannot fix.
+function reportIngestLag(deps: WsServerDeps, ingestWaitMs: number): void {
+  const high = ingestWaitMs >= deps.maxPublishLagMs;
+  if (high && !deps.session.ingestLagHigh) {
+    deps.session.ingestLagHigh = true;
+    void logEvent('warn', { event: 'ingest_lag_high', ingestWaitMs: Math.round(ingestWaitMs) });
+  } else if (!high && deps.session.ingestLagHigh) {
+    deps.session.ingestLagHigh = false;
+    void logEvent('info', { event: 'ingest_lag_cleared', ingestWaitMs: Math.round(ingestWaitMs) });
+  }
+}
+
 function createEnqueuePublish(deps: WsServerDeps): Publisher {
   // Shared tail: record the line in the lag tracker, then append one ordered
   // link to publishQueue that sends the pre-computed results in order and
@@ -192,6 +220,7 @@ function createEnqueuePublish(deps: WsServerDeps): Publisher {
         tracker.dequeue();
       }
       sendPrepared(line, results, deps, viewerMessageType);
+      reportLag(deps, deps.session.liveLag.lagMs(Date.now()));
     });
   }
 
@@ -284,7 +313,7 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
     });
   }
 
-  const { enqueuePublish } = createEnqueuePublish(deps);
+  const { enqueuePublish, publishEnglish } = createEnqueuePublish(deps);
 
   ws.on('message', (data, isBinary) => {
     void (async () => {
@@ -327,8 +356,9 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                 flushPendingAudio();
               },
               onFinalSegment: (text) => {
+                const receivedAt = Date.now();
                 deps.session.ingestQueue = deps.session.ingestQueue
-                  .then(() => handleFinalSegmentFast(text, deps, ws, enqueuePublish, schedulePrefetch))
+                  .then(() => handleFinalSegmentFast(text, deps, ws, enqueuePublish, publishEnglish, schedulePrefetch, receivedAt))
                   .catch((error) => {
                     void logEvent('error', {
                       event: 'segment_processing_failed',
@@ -696,8 +726,12 @@ async function handleFinalSegmentFast(
   deps: WsServerDeps,
   captureSocket: WebSocket,
   enqueuePublish: EnqueuePublish,
-  schedulePrefetch: (line: CaptionLine, precedingContext: string[]) => void
+  publishEnglish: (line: CaptionLine, viewerMessageType?: 'caption' | 'caption-inserted') => void,
+  schedulePrefetch: (line: CaptionLine, precedingContext: string[]) => void,
+  receivedAt: number
 ): Promise<void> {
+  reportIngestLag(deps, Date.now() - receivedAt);
+
   const recentLines = deps.session.buffer.getRecent();
   const precedingContext = recentLines
     .filter((recentLine) => !recentLine.suppressed)
@@ -750,6 +784,17 @@ async function handleFinalSegmentFast(
   const pendingPayload = JSON.stringify({ type: 'caption-pending', id: line.id, english: line.english });
   for (const viewerSocket of deps.session.getAllViewers()) {
     viewerSocket.send(pendingPayload);
+  }
+
+  const lagMs = deps.session.liveLag.lagMs(Date.now());
+  reportLag(deps, lagMs);
+  if (lagMs >= deps.maxPublishLagMs) {
+    // Behind: skip translation entirely and publish the (already
+    // transcription-verified) English now, so the live LLM budget frees up and
+    // the pipeline catches up.
+    void logEvent('warn', { event: 'caption_lag_shed', reason: 'ingest_backpressure', english, lagMs: Math.round(lagMs) });
+    publishEnglish(line);
+    return;
   }
 
   const activeLanguages = deps.session.getActiveLanguages();
