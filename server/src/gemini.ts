@@ -1,5 +1,6 @@
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { TRANSLATION_FIXED_RULES, buildTranslateTaskText, buildTranslateBacklogTaskText } from './llmPrompts.js';
+import { parseLlmJson } from './llmResponse.js';
 
 export interface SermonCacheRef {
   name: string;
@@ -73,7 +74,7 @@ export async function translateSegment(
     },
   });
 
-  return JSON.parse(response.text ?? '{}');
+  return parseLlmJson(response.text, 'translate') as Record<string, string>;
 }
 
 export async function translateBacklog(
@@ -103,6 +104,6 @@ export async function translateBacklog(
     },
   });
 
-  const parsed = JSON.parse(response.text ?? '{"translations":[]}');
+  const parsed = parseLlmJson(response.text, 'translate_backlog') as { translations?: string[] };
   return parsed.translations ?? [];
 }

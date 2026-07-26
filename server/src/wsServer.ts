@@ -62,6 +62,12 @@ interface PreparedLanguageResult {
   translated: string;
   flagged: boolean;
   reason?: string;
+  // Set when `translated` is only the English stand-in for a language the
+  // translate call never returned. It is still sent — every active language
+  // owes its viewers exactly one caption — but deliberately not cached, so a
+  // viewer joining later can still get a real translation through
+  // ensureBacklogCached instead of being served this placeholder forever.
+  untranslated?: boolean;
 }
 
 export interface WsServerDeps {
@@ -686,9 +692,25 @@ async function prepareTranslationsForPublish(
   const flagMode = deps.session.translationFlagDisplayMode === 'flag';
 
   const results: PreparedLanguageResult[] = [];
+  // A language the translate call didn't return used to be skipped outright,
+  // which left its viewers with no result — and therefore nothing sent. If the
+  // empty response came back slowly the publish deadline eventually handed them
+  // English; if it came back quickly the empty result won that race and they sat
+  // on the pending line forever, never receiving a terminal message. Either way
+  // events.log showed a healthy line.
+  //
+  // Falling back to English here instead makes the outcome the same one a failed
+  // verification already produces (README: "fail-safe fallback, not fail-open"),
+  // so every active language always gets exactly one caption. Logged once per
+  // line rather than once per language, so a wholly-empty response is one entry.
+  const missingLanguages: string[] = [];
   for (const language of activeLanguages) {
     const translated = translations[language];
-    if (!translated) continue;
+    if (!translated) {
+      missingLanguages.push(language);
+      results.push({ language, translated: line.english, flagged: false, untranslated: true });
+      continue;
+    }
 
     const verification = verifications[language];
     const safe = verification?.safe === true;
@@ -701,6 +723,14 @@ async function prepareTranslationsForPublish(
     }
 
     results.push({ language, translated: outgoing, flagged, reason: flagged ? reason : undefined });
+  }
+  if (missingLanguages.length > 0) {
+    void logEvent('warn', {
+      event: 'translation_missing_language',
+      english: line.english,
+      languages: missingLanguages,
+      returned: Object.keys(translations),
+    });
   }
   return results;
 }
@@ -717,12 +747,14 @@ function sendPrepared(
 ): void {
   if (results === null) return;
 
-  for (const { language, translated, flagged, reason } of results) {
-    deps.session.translationCache.set(
-      language,
-      line.id,
-      flagged ? { translated, flagged: true, reason: reason! } : { translated, flagged: false }
-    );
+  for (const { language, translated, flagged, reason, untranslated } of results) {
+    if (!untranslated) {
+      deps.session.translationCache.set(
+        language,
+        line.id,
+        flagged ? { translated, flagged: true, reason: reason! } : { translated, flagged: false }
+      );
+    }
 
     const payload = JSON.stringify({
       type: viewerMessageType,
@@ -746,6 +778,7 @@ function sendPrepared(
 // eventually-arrived path below.
 function cacheCorrectedTranslations(deps: WsServerDeps, line: CaptionLine, results: PreparedLanguageResult[]): void {
   for (const result of results) {
+    if (result.untranslated) continue;
     deps.session.translationCache.set(
       result.language,
       line.id,
@@ -779,16 +812,27 @@ function cacheCorrectedTranslations(deps: WsServerDeps, line: CaptionLine, resul
 // `markedLanguages`) can disagree: if a language left and rejoined between
 // shed and prepare, `results` may contain an upgrade for it while this loop
 // never sends to it, or vice versa.
+// Which languages actually got new text and which were left on the English
+// they were already showing. Reported per language rather than as a single
+// boolean: the old `hasUpgrade` was an OR across the whole line, so a line that
+// upgraded for Spanish but never translated for Japanese logged as a clean
+// 'upgrade' — the per-language failure the 2026-07-26 untranslated-line report
+// turned out to be had no trace in events.log at all.
+interface CorrectionOutcome {
+  upgraded: string[];
+  settled: string[];
+}
+
 function sendCorrection(
   deps: WsServerDeps,
   line: CaptionLine,
   results: PreparedLanguageResult[] | null,
   withinWindow: boolean,
   markedLanguages: string[]
-): boolean {
+): CorrectionOutcome {
   if (results) cacheCorrectedTranslations(deps, line, results);
 
-  let hasUpgrade = false;
+  const outcome: CorrectionOutcome = { upgraded: [], settled: [] };
   for (const language of markedLanguages) {
     const result = results?.find((entry) => entry.language === language);
 
@@ -797,7 +841,7 @@ function sendCorrection(
     // back to the English we already published, which is a settle, not an
     // upgrade.
     const isUpgrade = result !== undefined && withinWindow && result.translated !== line.english;
-    if (isUpgrade) hasUpgrade = true;
+    outcome[isUpgrade ? 'upgraded' : 'settled'].push(language);
     const payload = JSON.stringify({
       type: 'caption-corrected',
       id: line.id,
@@ -812,7 +856,7 @@ function sendCorrection(
       viewerSocket.send(payload);
     }
   }
-  return hasUpgrade;
+  return outcome;
 }
 
 // Waits for the retained translation and delivers the line's terminal
@@ -919,7 +963,8 @@ function scheduleCorrection(
         return;
       }
 
-      const hasUpgrade = sendCorrection(deps, line, results, !timedOut, markedLanguages);
+      const { upgraded, settled } = sendCorrection(deps, line, results, !timedOut, markedLanguages);
+      const hasUpgrade = upgraded.length > 0;
       // `no_result` covers a `null` results — the prepared promise rejected,
       // or the line was suppressed inside prepareTranslationsForPublish.
       // `empty_result` is operationally the same "nothing came back" outcome
@@ -939,10 +984,15 @@ function scheduleCorrection(
             : results.length === 0
               ? 'empty_result'
               : 'not_an_improvement';
+      // `outcome` stays whole-line for continuity with existing log readers,
+      // but `settledLanguages` is what catches the partial case: a line that
+      // upgraded for one language while another was left showing English is
+      // an 'upgrade' here, and only this field says so.
       void logEvent('info', {
         event: 'caption_corrected',
         outcome: hasUpgrade ? 'upgrade' : 'settle',
         ...(settleReason ? { reason: settleReason } : {}),
+        ...(hasUpgrade && settled.length > 0 ? { settledLanguages: settled } : {}),
         id: line.id,
         english: line.english,
         lagMs: Date.now() - shedAt,

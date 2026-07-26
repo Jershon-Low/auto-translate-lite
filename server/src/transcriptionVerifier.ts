@@ -1,4 +1,5 @@
 import { thinkingConfigFor, type GeminiClient, type SermonCacheRef } from './gemini.js';
+import { parseLlmJson } from './llmResponse.js';
 import {
   TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO,
   TRANSCRIPTION_VERIFIER_FIXED_RULES_OUTRO,
@@ -44,7 +45,7 @@ export async function verifyTranscription(
     },
   });
 
-  const parsed: unknown = JSON.parse(response.text ?? '{}');
+  const parsed: unknown = parseLlmJson(response.text, 'verify_transcription');
   if (
     parsed &&
     typeof parsed === 'object' &&
