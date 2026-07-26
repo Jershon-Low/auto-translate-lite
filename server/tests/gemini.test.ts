@@ -145,3 +145,24 @@ describe('translateBacklog', () => {
     expect(call.config.thinkingConfig).toEqual({ thinkingLevel: ThinkingLevel.MINIMAL });
   });
 });
+
+describe('empty Gemini response bodies', () => {
+  function emptyClient(text: string | undefined): GeminiClient {
+    return {
+      models: { generateContent: vi.fn().mockResolvedValue({ text }) },
+      caches: { create: vi.fn(), delete: vi.fn() },
+    };
+  }
+
+  it('translateSegment throws rather than returning {} when the body is absent', async () => {
+    await expect(
+      translateSegment(emptyClient(undefined), MODEL, 'Hello', ['ja'], TRANSLATION_DEFAULT_NOTES)
+    ).rejects.toThrow(/empty translate response/);
+  });
+
+  it('translateBacklog throws rather than returning [] when the body is absent', async () => {
+    await expect(
+      translateBacklog(emptyClient(undefined), MODEL, ['Hello'], 'ja', TRANSLATION_DEFAULT_NOTES)
+    ).rejects.toThrow(/empty translate_backlog response/);
+  });
+});

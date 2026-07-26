@@ -158,4 +158,55 @@ describe('OpenRouterProvider', () => {
     const secondCall = (client.chat.completions.create as any).mock.calls[1][0];
     expect(secondCall.reasoning).toEqual({ effort: 'medium' });
   });
+
+  describe('empty response bodies', () => {
+    // OpenRouterChatCompletionResponse declares `content: string | null`. A null
+    // body used to be coerced to '{}', which translate() returned as "no
+    // language came back" — the viewer silently got English, no retry, no log.
+    function nullContentClient(): OpenRouterClient {
+      return {
+        chat: {
+          completions: { create: vi.fn().mockResolvedValue({ choices: [{ message: { content: null } }] }) },
+        },
+      };
+    }
+
+    it('translate() throws instead of returning {} when the body is null', async () => {
+      const provider = new OpenRouterProvider(nullContentClient(), 'model', 'notes');
+      await expect(provider.translate('Hello', ['ja'], [], null)).rejects.toThrow(/empty translate response/);
+    });
+
+    it('verifyTranslations() throws instead of returning {} when the body is null', async () => {
+      const provider = new OpenRouterProvider(nullContentClient(), 'model', 'notes');
+      await expect(
+        provider.verifyTranslations([{ id: 'ja', english: 'Hello', translated: 'こんにちは' }], null)
+      ).rejects.toThrow(/empty verify_translations response/);
+    });
+
+    it('verifyTranscription() throws instead of reporting a verdict when the body is null', async () => {
+      const provider = new OpenRouterProvider(nullContentClient(), 'model', 'notes');
+      await expect(provider.verifyTranscription('Hello', [], null)).rejects.toThrow(
+        /empty verify_transcription response/
+      );
+    });
+
+    it('translateBacklog() throws instead of returning [] when the body is null', async () => {
+      const provider = new OpenRouterProvider(nullContentClient(), 'model', 'notes');
+      await expect(provider.translateBacklog(['Hello'], 'ja', null)).rejects.toThrow(
+        /empty translate_backlog response/
+      );
+    });
+
+    it('throws on an empty body from the json_object fallback path too', async () => {
+      // First call rejects with an unsupported-response_format error, so the
+      // provider retries without the schema — that path had the same hole.
+      const create = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('response_format is not supported'))
+        .mockResolvedValueOnce({ choices: [{ message: { content: '' } }] });
+      const provider = new OpenRouterProvider({ chat: { completions: { create } } }, 'model', 'notes');
+      await expect(provider.translate('Hello', ['ja'], [], null)).rejects.toThrow(/empty translate response/);
+      expect(create).toHaveBeenCalledTimes(2);
+    });
+  });
 });

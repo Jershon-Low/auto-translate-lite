@@ -15,7 +15,7 @@ import {
   DEFAULT_TRANSLATION_FLAG_DISPLAY_CONFIG,
   type TranslationFlagDisplayStore,
 } from '../src/translationFlagDisplayStore';
-import { createLogHub, type LogHub } from '../src/logHub';
+import { createLogHub, logHub as processLogHub, type LogHub } from '../src/logHub';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -3788,6 +3788,140 @@ describe('wsServer', () => {
       captureSocket.close();
       viewerSocket.close();
       reviewSocket.close();
+    });
+  });
+
+  describe('untranslated language (empty translate response)', () => {
+    // 2026-07-26: viewers on Japanese/Korean intermittently saw the English
+    // line instead of a translation — no red flag, and nothing in events.log.
+    // A null/empty body from the translate call was coerced to {}, so the
+    // language had no result, no retry fired, and the deadline's English
+    // fallback was simply left standing.
+    function markerCount(event: string, since: number): number {
+      return processLogHub.getHistory().slice(since).filter((entry) => entry.event === event).length;
+    }
+
+    it('retries and logs translation_failed instead of silently yielding no translation', async () => {
+      const before = processLogHub.getHistory().length;
+      // With the only active language missing from the response there is
+      // nothing to publish, so the viewer waits on caption-pending until the
+      // deadline hands it English — exactly what was seen in production.
+      deps.maxPublishLagMs = 60;
+      const passThrough = (geminiClient.models.generateContent as any).getMockImplementation();
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        // Only the translate call comes back empty; the checks still work.
+        if (
+          !params.contents.includes('transcription accuracy checker') &&
+          !params.contents.includes('safety checker')
+        ) {
+          return Promise.resolve({ text: undefined });
+        }
+        return passThrough(params);
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'ja' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const caption = await captionPromise;
+
+      // The viewer still ends up on English — that part is the correct
+      // fallback — but the failure is now on the record instead of being
+      // invisible, and both retries were actually attempted.
+      expect(caption.english).toBe('Hello everyone');
+      expect(caption.translated).toBe('Hello everyone');
+      expect(caption.flagged).toBeUndefined(); // never reaches the verifier, so never red
+      expect(markerCount('translation_failed', before)).toBeGreaterThan(0);
+
+      viewerSocket.close();
+      captureSocket.close();
+    });
+
+    it('logs translation_missing_language naming the language the model omitted', async () => {
+      const before = processLogHub.getHistory().length;
+      const passThrough = (geminiClient.models.generateContent as any).getMockImplementation();
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        // A well-formed response that simply omits 'ja' — the partial-response
+        // shape, distinct from a wholly empty body.
+        if (
+          !params.contents.includes('transcription accuracy checker') &&
+          !params.contents.includes('safety checker')
+        ) {
+          return Promise.resolve({ text: '{"zh":"你好"}' });
+        }
+        return passThrough(params);
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'ja' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      const missing = processLogHub
+        .getHistory()
+        .slice(before)
+        .filter((entry) => entry.event === 'translation_missing_language');
+      expect(missing.length).toBeGreaterThan(0);
+      expect(missing[0].languages).toEqual(['ja']);
+      expect(missing[0].returned).toEqual(['zh']);
+
+      viewerSocket.close();
+      captureSocket.close();
+    });
+
+    it('still delivers a terminal caption when the empty response returns before the deadline', async () => {
+      // The nastier variant: an empty translate response that resolves quickly
+      // beats the publish deadline, so there is no English fallback coming.
+      // Before the fix sendPrepared had nothing to send and no correction was
+      // owed, stranding the viewer on the pending line for good.
+      deps.maxPublishLagMs = 60000; // deadline must NOT be what rescues this
+      const passThrough = (geminiClient.models.generateContent as any).getMockImplementation();
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (
+          !params.contents.includes('transcription accuracy checker') &&
+          !params.contents.includes('safety checker')
+        ) {
+          return Promise.resolve({ text: '{}' }); // parses fine, just has no languages
+        }
+        return passThrough(params);
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'ja' }));
+      await waitForMessage(viewerSocket); // backlog: []
+
+      const captionPromise = waitForMessage(viewerSocket);
+      capturedCallbacks!.onFinalSegment('Hello everyone');
+      const caption = await captionPromise;
+
+      expect(caption.type).toBe('caption');
+      expect(caption.translated).toBe('Hello everyone');
+      expect(caption.awaitingCorrection).toBeUndefined(); // terminal, not left waiting
+
+      viewerSocket.close();
+      captureSocket.close();
     });
   });
 });

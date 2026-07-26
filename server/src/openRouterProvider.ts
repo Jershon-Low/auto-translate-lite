@@ -3,6 +3,7 @@ import type { LlmProvider, OpenRouterReasoningEffort } from './llmTypes.js';
 import type { SermonCacheRef } from './gemini.js';
 import type { TranscriptionCheckResult } from './transcriptionVerifier.js';
 import type { VerificationItem, VerificationResult } from './translationVerifier.js';
+import { parseLlmJson } from './llmResponse.js';
 import {
   TRANSLATION_FIXED_RULES,
   TRANSCRIPTION_VERIFIER_FIXED_RULES_INTRO,
@@ -134,7 +135,7 @@ export class OpenRouterProvider implements LlmProvider {
         response_format: { type: 'json_schema', json_schema: { name: schemaName, strict: true, schema } },
         ...reasoningParam,
       });
-      return JSON.parse(response.choices[0]?.message.content ?? '{}');
+      return parseLlmJson(response.choices[0]?.message.content, schemaName);
     } catch (error) {
       if (!isUnsupportedResponseFormatError(error)) throw error;
       const fallbackMessages: OpenRouterMessage[] = [
@@ -150,7 +151,7 @@ export class OpenRouterProvider implements LlmProvider {
         response_format: { type: 'json_object' },
         ...reasoningParam,
       });
-      return JSON.parse(response.choices[0]?.message.content ?? '{}');
+      return parseLlmJson(response.choices[0]?.message.content, schemaName);
     }
   }
 }
