@@ -173,4 +173,50 @@ describe('OpenRouterRateLimiter', () => {
     await vi.advanceTimersByTimeAsync(150); // clock -> ~2050, past the t=2000 slot-free
     expect(started.live4).toBe(true); // must have run; with the bug it waits until ~3900
   });
+
+  it('admits critical waiters ahead of live ones when the window frees up', async () => {
+    const limiter = new OpenRouterRateLimiter(1, 2000);
+    const order: string[] = [];
+
+    const first = limiter.run(async () => {
+      order.push('first');
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(order).toEqual(['first']); // window is now full
+
+    const live = limiter.run(async () => {
+      order.push('live');
+    }, 'live');
+    const critical = limiter.run(async () => {
+      order.push('critical');
+    }, 'critical');
+
+    // One slot per window, so each rollover releases exactly one waiter —
+    // critical takes the first, live the next.
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(order).toEqual(['first', 'critical']);
+
+    await vi.advanceTimersByTimeAsync(2100);
+    await Promise.all([first, live, critical]);
+    expect(order).toEqual(['first', 'critical', 'live']);
+  });
+
+  it('wakes the timer for a queued critical waiter, not just a live one', async () => {
+    // nextWaitMs has to count criticalQueue as a reason to re-arm; if it only
+    // looked at liveQueue, a lone critical waiter would hang until something
+    // else happened to schedule a drain.
+    const limiter = new OpenRouterRateLimiter(1, 2000);
+    let criticalRan = false;
+
+    const first = limiter.run(async () => {});
+    await vi.advanceTimersByTimeAsync(0);
+
+    const critical = limiter.run(async () => {
+      criticalRan = true;
+    }, 'critical');
+
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(criticalRan).toBe(true);
+    await Promise.all([first, critical]);
+  });
 });

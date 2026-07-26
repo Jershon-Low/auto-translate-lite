@@ -28,6 +28,34 @@ export class TranscriptBuffer {
     return line;
   }
 
+  // Reserves an ordered slot for a segment whose transcription check hasn't
+  // come back yet, so verification can run concurrently without letting a
+  // faster later segment overtake a slower earlier one. The line counts as
+  // preceding context immediately — its text is what was heard, checked or
+  // not — but `unverified` keeps it out of backlog snapshots until
+  // applyVerdict runs, because it has not been broadcast to anyone yet.
+  reserve(english: string, timestampMs: number = Date.now()): CaptionLine {
+    const line = this.append(english, timestampMs, false);
+    line.unverified = true;
+    return line;
+  }
+
+  // Applies a transcription verdict to a reserved line, in place. Takes the
+  // object reserve handed out rather than an id: trim may have dropped the
+  // line from the window while its check was in flight, and the verdict still
+  // has to land on it (the publish path holds the same reference).
+  //
+  // Only ever sets `suppressed`, never clears it: an admin remove that landed
+  // during the check has already told viewers the line is gone, and a `safe`
+  // verdict arriving afterwards must not resurrect it.
+  applyVerdict(line: CaptionLine, verdict: { suppressed: boolean; pending?: boolean; reason?: string }): void {
+    line.unverified = undefined;
+    if (!verdict.suppressed || line.suppressed) return;
+    line.suppressed = true;
+    line.pending = verdict.pending;
+    line.reason = verdict.reason;
+  }
+
   peek(id: string, nowMs: number = Date.now()): CaptionLine | null {
     this.trim(nowMs);
     return this.lines.find((candidate) => candidate.id === id) ?? null;

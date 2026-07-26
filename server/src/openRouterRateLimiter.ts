@@ -8,6 +8,7 @@ import type { CallPriority } from './geminiLimiter.js';
 export class OpenRouterRateLimiter {
   private readonly startTimes: number[] = []; // all starts in the current window
   private readonly backlogStartTimes: number[] = []; // backlog-only starts in the current window
+  private readonly criticalQueue: Array<() => void> = [];
   private readonly liveQueue: Array<() => void> = [];
   private readonly backlogQueue: Array<() => void> = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -25,16 +26,28 @@ export class OpenRouterRateLimiter {
 
   private acquire(priority: CallPriority): Promise<void> {
     return new Promise((resolve) => {
-      (priority === 'backlog' ? this.backlogQueue : this.liveQueue).push(resolve);
+      this.queueFor(priority).push(resolve);
       this.drain();
     });
+  }
+
+  private queueFor(priority: CallPriority): Array<() => void> {
+    if (priority === 'critical') return this.criticalQueue;
+    if (priority === 'backlog') return this.backlogQueue;
+    return this.liveQueue;
   }
 
   private drain(): void {
     const now = Date.now();
     this.prune(now);
 
-    // Live first (priority).
+    // Critical first — the transcription check gates every caption, so it must
+    // never spend the window queued behind translation traffic.
+    while (this.criticalQueue.length > 0 && this.startTimes.length < this.maxPerWindow) {
+      this.startTimes.push(now);
+      this.criticalQueue.shift()!();
+    }
+    // Then live.
     while (this.liveQueue.length > 0 && this.startTimes.length < this.maxPerWindow) {
       this.startTimes.push(now);
       this.liveQueue.shift()!();
@@ -79,7 +92,7 @@ export class OpenRouterRateLimiter {
     const candidates: number[] = [];
     // Only meaningful when mainFull (which implies startTimes is non-empty).
     const mainWindowDelay = this.windowMs - (now - this.startTimes[0]);
-    if (this.liveQueue.length > 0 && mainFull) {
+    if ((this.criticalQueue.length > 0 || this.liveQueue.length > 0) && mainFull) {
       candidates.push(mainWindowDelay);
     }
     if (this.backlogQueue.length > 0) {

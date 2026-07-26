@@ -26,10 +26,20 @@ export class Session {
   translationFlagDisplayMode: TranslationFlagDisplayMode = 'hide';
   captureSocket: WebSocket | null = null;
   ingestQueue: Promise<void> = Promise.resolve();
+  // Ordered emit chain for the concurrent verification stage. Segments start
+  // their transcription check in parallel (off ingestQueue, which stays
+  // synchronous) but publish their results through this chain, so clients
+  // still see lines in arrival order. See wsServer's beginSegment/emitSegment.
+  verifyEmitQueue: Promise<void> = Promise.resolve();
   publishQueue: Promise<void> = Promise.resolve();
   liveLag: LiveLagTracker = new LiveLagTracker();
+  // Age of the oldest segment still waiting to clear the verification stage.
+  // Strict FIFO, same contract as liveLag: enqueued in beginSegment, dequeued
+  // in emitSegment, which run in the same order.
+  verifyLag: LiveLagTracker = new LiveLagTracker();
   isBehind: boolean = false;
   ingestLagHigh: boolean = false;
+  verifyLagHigh: boolean = false;
   private viewers: Map<WebSocket, string> = new Map();
   private reviewSockets: Set<WebSocket> = new Set();
 
@@ -44,10 +54,13 @@ export class Session {
     this.inFlightFills = new Map();
     this.translationFlagDisplayMode = 'hide';
     this.ingestQueue = Promise.resolve();
+    this.verifyEmitQueue = Promise.resolve();
     this.publishQueue = Promise.resolve();
     this.liveLag = new LiveLagTracker();
+    this.verifyLag = new LiveLagTracker();
     this.isBehind = false;
     this.ingestLagHigh = false;
+    this.verifyLagHigh = false;
   }
 
   stop(): void {

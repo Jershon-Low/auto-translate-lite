@@ -142,12 +142,29 @@ describe('Session', () => {
     expect(closed.send).not.toHaveBeenCalled();
   });
 
-  it('start() resets ingestQueue and publishQueue to fresh resolved promises', () => {
+  it('start() resets ingestQueue, verifyEmitQueue and publishQueue to fresh resolved promises', () => {
     const session = new Session();
     const originalIngest = session.ingestQueue;
+    const originalVerifyEmit = session.verifyEmitQueue;
     const originalPublish = session.publishQueue;
     session.start();
     expect(session.ingestQueue).not.toBe(originalIngest);
+    expect(session.verifyEmitQueue).not.toBe(originalVerifyEmit);
     expect(session.publishQueue).not.toBe(originalPublish);
+  });
+
+  it('start() clears verification-stage lag state so a new session does not inherit the old one', () => {
+    // verifyLag is strict FIFO: carrying entries across a restart would leave
+    // the tracker permanently reading high, since their dequeues never come.
+    const session = new Session();
+    session.verifyLag.enqueue(1000);
+    session.verifyLagHigh = true;
+    const originalVerifyLag = session.verifyLag;
+
+    session.start();
+
+    expect(session.verifyLag).not.toBe(originalVerifyLag);
+    expect(session.verifyLag.size).toBe(0);
+    expect(session.verifyLagHigh).toBe(false);
   });
 });

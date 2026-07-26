@@ -209,4 +209,55 @@ describe('GeminiCallLimiter', () => {
     second.resolve('b');
     await Promise.all([firstRun, secondRun]);
   });
+
+  it('admits a critical waiter ahead of live waiters already queued', async () => {
+    // The transcription check gates every caption in every language; it must
+    // never sit behind the translation traffic it shares a limiter with.
+    const limiter = new GeminiCallLimiter(1);
+    const blocker = deferred<string>();
+    const order: string[] = [];
+
+    const blocking = limiter.run(() => {
+      order.push('blocker');
+      return blocker.promise;
+    });
+    const live = limiter.run(async () => {
+      order.push('live');
+    }, 'live');
+    const critical = limiter.run(async () => {
+      order.push('critical');
+    }, 'critical');
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(order).toEqual(['blocker']); // both queued behind the single slot
+
+    blocker.resolve('done');
+    await Promise.all([blocking, live, critical]);
+    expect(order).toEqual(['blocker', 'critical', 'live']);
+  });
+
+  it('still admits live ahead of backlog once critical waiters are drained', async () => {
+    const limiter = new GeminiCallLimiter(1);
+    const blocker = deferred<string>();
+    const order: string[] = [];
+
+    const blocking = limiter.run(() => {
+      order.push('blocker');
+      return blocker.promise;
+    });
+    const backlog = limiter.run(async () => {
+      order.push('backlog');
+    }, 'backlog');
+    const live = limiter.run(async () => {
+      order.push('live');
+    }, 'live');
+    const critical = limiter.run(async () => {
+      order.push('critical');
+    }, 'critical');
+
+    await new Promise((resolve) => setImmediate(resolve));
+    blocker.resolve('done');
+    await Promise.all([blocking, backlog, live, critical]);
+    expect(order).toEqual(['blocker', 'critical', 'live', 'backlog']);
+  });
 });

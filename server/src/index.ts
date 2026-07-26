@@ -34,8 +34,12 @@ for (const key of requiredEnvVars) {
 const session = new Session();
 const costTracker = createCostTracker(process.env.COST_FILE_PATH ?? 'data/cost.json');
 const geminiLimiter = new GeminiCallLimiter();
-const geminiClient = withCostTracking(
-  withGeminiLimiter(createGeminiClient(process.env.GEMINI_API_KEY!), geminiLimiter),
+const geminiBaseClient = createGeminiClient(process.env.GEMINI_API_KEY!);
+const geminiClient = withCostTracking(withGeminiLimiter(geminiBaseClient, geminiLimiter), costTracker);
+// Same tier reasoning as openRouterClientCritical below — applies whenever the
+// transcription-verifier role is configured onto a Gemini model rather than OpenRouter.
+const geminiClientCritical = withCostTracking(
+  withGeminiLimiter(geminiBaseClient, geminiLimiter, 'critical'),
   costTracker
 );
 // Parse a positive-integer env override, falling back to `fallback` when the
@@ -72,6 +76,10 @@ function buildOpenRouterClient(priority: CallPriority): OpenRouterClient | null 
 }
 const openRouterClient = buildOpenRouterClient('live');
 const openRouterClientBacklog = buildOpenRouterClient('backlog');
+// The transcription check gates every caption in every language, so it gets
+// the top limiter tier: it must never wait behind the translation calls it
+// would otherwise share a queue with.
+const openRouterClientCritical = buildOpenRouterClient('critical');
 const sermonDocStore = createSermonDocStore();
 const feedbackStore = createFeedbackStore(process.env.FEEDBACK_FILE_PATH ?? 'data/feedback.txt');
 const viewerFeedbackStore = createViewerFeedbackStore(
@@ -113,6 +121,7 @@ attachWsServer({
   geminiClient,
   llmClients: { gemini: geminiClient, openRouter: openRouterClient },
   backlogLlmClients: { gemini: geminiClient, openRouter: openRouterClientBacklog },
+  criticalLlmClients: { gemini: geminiClientCritical, openRouter: openRouterClientCritical },
   deepgramApiKey: process.env.DEEPGRAM_API_KEY!,
   createDeepgramConnection,
   sermonDocStore,
