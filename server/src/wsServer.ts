@@ -70,6 +70,10 @@ export interface WsServerDeps {
   geminiClient: GeminiClient;
   llmClients: LlmClients;
   backlogLlmClients: LlmClients;
+  // Clients bound to the 'critical' limiter tier, used only for the
+  // transcription check. Optional: falls back to llmClients, which is the
+  // pre-tier behaviour and keeps every caller that doesn't care unchanged.
+  criticalLlmClients?: LlmClients;
   deepgramApiKey: string;
   createDeepgramConnection: DeepgramConnectionFactory;
   sermonDocStore: SermonDocStore;
@@ -202,12 +206,14 @@ function reportLag(deps: WsServerDeps, lagMs: number): void {
   }
 }
 
-// Ingest-path lag: how long a segment waited in the (un-sheddable) ingest queue
-// before processing began. Measured only — surfaces a slow transcription
-// verifier that back-pressure cannot fix.
-// Note: this only runs at the top of handleFinalSegmentFast, so the "cleared"
-// edge is next-segment-triggered, not proactive — if ingest wait spikes and
-// speech then stops entirely, ingest_lag_cleared won't log until a new segment
+// Ingest-path lag: how long a segment waited on session.ingestQueue before
+// beginSegment ran. That queue no longer awaits an LLM call, so this should
+// now sit near zero; a non-zero reading means phase A itself is blocked (an
+// admin remove/reinstate mid-operation, say), not a slow checker. Checker
+// latency shows up in reportVerifyLag instead.
+// Note: this only runs at the top of beginSegment, so the "cleared" edge is
+// next-segment-triggered, not proactive — if ingest wait spikes and speech
+// then stops entirely, ingest_lag_cleared won't log until a new segment
 // arrives. Harmless (no user-visible effect) and inherent to measuring lag
 // per-segment; unlike the publish path, there's no idle/drain callback to hook.
 function reportIngestLag(deps: WsServerDeps, ingestWaitMs: number): void {
@@ -218,6 +224,23 @@ function reportIngestLag(deps: WsServerDeps, ingestWaitMs: number): void {
   } else if (!high && deps.session.ingestLagHigh) {
     deps.session.ingestLagHigh = false;
     void logEvent('info', { event: 'ingest_lag_cleared', ingestWaitMs: Math.round(ingestWaitMs) });
+  }
+}
+
+// Verification-stage lag: how long the oldest segment has been waiting to
+// clear its transcription check and be emitted. Edge-triggered, like the two
+// above. This is the number that matters now — the serial ingest queue used to
+// absorb this delay invisibly (see reportIngestLag's note), and a session once
+// ran 6 minutes behind with nothing but a single un-cleared ingest_lag_high to
+// show for it.
+function reportVerifyLag(deps: WsServerDeps, verifyLagMs: number): void {
+  const high = verifyLagMs >= deps.maxPublishLagMs;
+  if (high && !deps.session.verifyLagHigh) {
+    deps.session.verifyLagHigh = true;
+    void logEvent('warn', { event: 'verify_lag_high', verifyLagMs: Math.round(verifyLagMs) });
+  } else if (!high && deps.session.verifyLagHigh) {
+    deps.session.verifyLagHigh = false;
+    void logEvent('info', { event: 'verify_lag_cleared', verifyLagMs: Math.round(verifyLagMs) });
   }
 }
 
@@ -400,7 +423,11 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
               translationVerifier: getProvider(modelConfig.translationVerifier, promptConfig.translationVerifier, clients),
             });
             deps.session.providers = {
-              transcriptionVerifier: getProvider(modelConfig.transcriptionVerifier, promptConfig.transcriptionVerifier, deps.llmClients),
+              transcriptionVerifier: getProvider(
+                modelConfig.transcriptionVerifier,
+                promptConfig.transcriptionVerifier,
+                deps.criticalLlmClients ?? deps.llmClients
+              ),
               ...buildTranslationProviders(deps.llmClients),
             };
             deps.session.backlogProviders = buildTranslationProviders(deps.backlogLlmClients);
@@ -427,8 +454,12 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
               },
               onFinalSegment: (text) => {
                 const receivedAt = Date.now();
+                // Still chained on ingestQueue so a segment cannot interleave
+                // with an admin remove/reinstate mid-operation, but beginSegment
+                // no longer awaits anything — the queue stays drained and the
+                // transcription check runs concurrently behind it.
                 deps.session.ingestQueue = deps.session.ingestQueue
-                  .then(() => handleFinalSegmentFast(text, deps, ws, enqueuePublish, publishEnglish, schedulePrefetch, receivedAt))
+                  .then(() => beginSegment(text, deps, ws, enqueuePublish, publishEnglish, schedulePrefetch, receivedAt))
                   .catch((error) => {
                     void logEvent('error', {
                       event: 'segment_processing_failed',
@@ -543,7 +574,13 @@ function handleReviewConnection(ws: WebSocket, deps: WsServerDeps): void {
   ws.send(
     JSON.stringify({
       type: 'backlog',
-      lines: deps.session.buffer.getRecent().map(buildReviewBacklogLine),
+      // Unverified lines hold a buffer slot but have never been broadcast;
+      // they arrive on this socket as a normal 'transcript' once their check
+      // lands, so including them here would double them up.
+      lines: deps.session.buffer
+        .getRecent()
+        .filter((line) => !line.unverified)
+        .map(buildReviewBacklogLine),
       mode: deps.session.mode,
       status: deps.session.isActive ? 'recording' : 'idle',
     })
@@ -1031,7 +1068,57 @@ async function handleAdminRemove(id: string, deps: WsServerDeps, requestingSocke
   }
 }
 
-async function handleFinalSegmentFast(
+// Bounds how long the ordered emit chain will wait on one segment's check.
+// Running the checks concurrently fixes throughput, but not a check that hangs
+// outright: that one is already in flight, and every segment queued behind it
+// on the emit chain waits — the same head-of-line failure this split exists to
+// remove, just moved one stage along. Each segment's wait is therefore capped
+// at maxPublishLagMs from its own arrival.
+//
+// On expiry the line publishes *unchecked*: the checker being unavailable is
+// not a reason to leave viewers dark, and it matches how raceAgainstDeadline
+// treats a stalled translation. A late verdict is then ignored rather than
+// retracted — the line is on screen and being read, and pulling it back out
+// from under a reader is worse than the small chance it was mis-transcribed.
+async function raceVerifyAgainstDeadline(
+  verifyPromise: Promise<TranscriptionCheckResult>,
+  deadlineMs: number,
+  english: string
+): Promise<TranscriptionCheckResult> {
+  void verifyPromise.catch(() => {});
+
+  const timedOutResult: TranscriptionCheckResult = { safe: true, reason: 'verification timed out' };
+  const remaining = deadlineMs - Date.now();
+  if (remaining <= 0) {
+    void logEvent('warn', { event: 'transcription_verify_timeout', english, waitedMs: 0 });
+    return timedOutResult;
+  }
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<typeof DEADLINE_REACHED>((resolve) => {
+    timer = setTimeout(() => resolve(DEADLINE_REACHED), remaining);
+  });
+  try {
+    const outcome = await Promise.race([verifyPromise, timeout]);
+    if (outcome === DEADLINE_REACHED) {
+      void logEvent('warn', { event: 'transcription_verify_timeout', english, waitedMs: Math.round(remaining) });
+      return timedOutResult;
+    }
+    return outcome;
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+// Phase A of ingest: everything that must happen in strict arrival order, with
+// no awaits. Runs on session.ingestQueue, which therefore never blocks on an
+// LLM call — the bug this split exists to fix. Reserving the buffer slot here
+// (rather than after the check, as this used to) is what fixes the ordering:
+// arrival order is fixed by `reserve`, so the check itself is free to run
+// concurrently and finish out of order.
+//
+// Returns nothing and awaits nothing; the rest of the work is chained onto
+// session.verifyEmitQueue, which re-serializes the *effects* in the same order.
+function beginSegment(
   english: string,
   deps: WsServerDeps,
   captureSocket: WebSocket,
@@ -1039,16 +1126,79 @@ async function handleFinalSegmentFast(
   publishEnglish: (line: CaptionLine, viewerMessageType?: 'caption' | 'caption-inserted') => void,
   schedulePrefetch: (line: CaptionLine, precedingContext: string[]) => void,
   receivedAt: number
+): void {
+  const now = Date.now();
+  reportIngestLag(deps, now - receivedAt);
+
+  const line = deps.session.buffer.reserve(english, now);
+  // Anchored on the reserved line's own position rather than the buffer tail,
+  // so a segment's context is the lines that actually preceded *it*, even
+  // though later segments have already reserved their slots behind it.
+  //
+  // Those preceding lines may themselves still be unverified, so a segment can
+  // now cite a line that is later flagged — where the serial version would
+  // have excluded it. That is the deliberate trade: context is advisory, the
+  // flag rate is a few percent, and the serial alternative was falling minutes
+  // behind. See the design doc referenced in types.ts.
+  const precedingContext = deps.session.buffer.precedingContextFor(line.id, PRECEDING_CONTEXT_LINES);
+
+  // Diagnostic only — the bound itself lives in raceVerifyAgainstDeadline,
+  // which caps each segment's wait and so caps this. Deliberately not a shed
+  // valve: skipping the call while behind would also stop us finding out the
+  // checker had recovered, whereas letting every segment issue its call and
+  // time out keeps probing and self-heals.
+  reportVerifyLag(deps, deps.session.verifyLag.lagMs(now));
+
+  const verifyPromise = verifyTranscriptionWithRetry(deps, english, precedingContext);
+
+  deps.session.verifyLag.enqueue(now);
+  deps.session.verifyEmitQueue = deps.session.verifyEmitQueue
+    .then(() =>
+      emitSegment(line, verifyPromise, now, precedingContext, deps, captureSocket, enqueuePublish, publishEnglish, schedulePrefetch)
+    )
+    .catch((error) => {
+      void logEvent('error', {
+        event: 'segment_processing_failed',
+        english,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+}
+
+// Phase B of ingest: waits for this segment's transcription check, then applies
+// the verdict and publishes. Chained on session.verifyEmitQueue so that even
+// though the checks resolve out of order, every client-visible effect lands in
+// arrival order — same guarantee the serial version gave, without the
+// head-of-line blocking.
+async function emitSegment(
+  line: CaptionLine,
+  verifyPromise: Promise<TranscriptionCheckResult>,
+  enqueuedAt: number,
+  precedingContext: string[],
+  deps: WsServerDeps,
+  captureSocket: WebSocket,
+  enqueuePublish: EnqueuePublish,
+  publishEnglish: (line: CaptionLine, viewerMessageType?: 'caption' | 'caption-inserted') => void,
+  schedulePrefetch: (line: CaptionLine, precedingContext: string[]) => void
 ): Promise<void> {
-  reportIngestLag(deps, Date.now() - receivedAt);
+  let transcriptionResult: TranscriptionCheckResult;
+  try {
+    transcriptionResult = await raceVerifyAgainstDeadline(verifyPromise, enqueuedAt + deps.maxPublishLagMs, line.english);
+  } finally {
+    // Must pair with beginSegment's enqueue on every path — this is a strict
+    // FIFO, so a missed dequeue would leave it reading high forever.
+    deps.session.verifyLag.dequeue();
+  }
 
-  const recentLines = deps.session.buffer.getRecent();
-  const precedingContext = recentLines
-    .filter((recentLine) => !recentLine.suppressed)
-    .slice(-PRECEDING_CONTEXT_LINES)
-    .map((recentLine) => recentLine.english);
+  const english = line.english;
+  // Admin-removed while the check was in flight: viewers already got
+  // line-removed and review already got the flagged transcript. Clear the
+  // reservation and stop — re-broadcasting would contradict what they have.
+  if (line.suppressed) {
+    deps.session.buffer.applyVerdict(line, { suppressed: false });
+    return;
+  }
 
-  const transcriptionResult = await verifyTranscriptionWithRetry(deps, english, precedingContext);
   const manualHold = deps.session.mode === 'manual';
   const suppressed = manualHold || !transcriptionResult.safe;
 
@@ -1061,7 +1211,7 @@ async function handleFinalSegmentFast(
         ? 'Pending manual approval'
         : `Pending manual approval — AI also flagged: ${transcriptionResult.reason}`
       : transcriptionResult.reason;
-    const line = deps.session.buffer.append(english, Date.now(), true, undefined, manualHold ? true : undefined, reason);
+    deps.session.buffer.applyVerdict(line, { suppressed: true, pending: manualHold ? true : undefined, reason });
 
     const payload = JSON.stringify({
       type: 'transcript',
@@ -1082,7 +1232,7 @@ async function handleFinalSegmentFast(
     return;
   }
 
-  const line = deps.session.buffer.append(english, Date.now(), false);
+  deps.session.buffer.applyVerdict(line, { suppressed: false });
   const payload = JSON.stringify({ type: 'transcript', id: line.id, english: line.english });
   captureSocket.send(payload);
   deps.session.broadcastToReview(payload);
@@ -1289,7 +1439,11 @@ function handleViewerConnection(ws: WebSocket, deps: WsServerDeps): void {
           const language = message.language as string;
           const cache = deps.session.translationCache;
 
-          const backlog = deps.session.buffer.getRecent();
+          // Same reason as the review backlog: a line still awaiting its
+          // transcription check has not been shown to anyone and must not be
+          // — it may yet be flagged. It reaches this viewer as a normal
+          // caption once emitSegment runs.
+          const backlog = deps.session.buffer.getRecent().filter((line) => !line.unverified);
           const visibleEntries = backlog.filter((line) => !line.suppressed);
           const missingEntries = selectBacklogEntriesToTranslate(
             visibleEntries,

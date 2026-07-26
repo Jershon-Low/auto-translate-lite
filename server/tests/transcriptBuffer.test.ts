@@ -207,4 +207,75 @@ describe('TranscriptBuffer', () => {
       expect(buffer.precedingContextFor('unknown', 7, 1000)).toEqual([]);
     });
   });
+
+  describe('reserve / applyVerdict', () => {
+    it('reserves an ordered, unverified slot that later segments can cite as context', () => {
+      const buffer = new TranscriptBuffer();
+      const first = buffer.reserve('First line', 1000);
+      const second = buffer.reserve('Second line', 1100);
+
+      expect(first.unverified).toBe(true);
+      expect(second.unverified).toBe(true);
+      expect(buffer.getRecent(1100).map((line) => line.english)).toEqual(['First line', 'Second line']);
+      // Anchored on position, so the second segment sees the first even though
+      // neither has been checked yet.
+      expect(buffer.precedingContextFor(second.id, 7, 1100)).toEqual(['First line']);
+      expect(buffer.precedingContextFor(first.id, 7, 1100)).toEqual([]);
+    });
+
+    it('clears unverified and leaves the line visible on a safe verdict', () => {
+      const buffer = new TranscriptBuffer();
+      const line = buffer.reserve('Safe line', 1000);
+      buffer.applyVerdict(line, { suppressed: false });
+
+      expect(line.unverified).toBeUndefined();
+      expect(line.suppressed).toBe(false);
+    });
+
+    it('suppresses the line with its reason on a flagged verdict', () => {
+      const buffer = new TranscriptBuffer();
+      const line = buffer.reserve('Bad line', 1000);
+      buffer.applyVerdict(line, { suppressed: true, pending: true, reason: 'misheard' });
+
+      expect(line.unverified).toBeUndefined();
+      expect(line.suppressed).toBe(true);
+      expect(line.pending).toBe(true);
+      expect(line.reason).toBe('misheard');
+    });
+
+    it('never un-suppresses a line an admin removed while the check was in flight', () => {
+      const buffer = new TranscriptBuffer();
+      const line = buffer.reserve('Doomed line', 1000);
+      buffer.suppress(line.id, 1000);
+
+      buffer.applyVerdict(line, { suppressed: false });
+
+      expect(line.suppressed).toBe(true);
+      expect(line.reason).toBe('Removed by admin');
+      expect(line.unverified).toBeUndefined();
+    });
+
+    it('does not overwrite an admin removal reason with a flagged verdict', () => {
+      const buffer = new TranscriptBuffer();
+      const line = buffer.reserve('Doomed line', 1000);
+      buffer.suppress(line.id, 1000);
+
+      buffer.applyVerdict(line, { suppressed: true, reason: 'misheard' });
+
+      expect(line.reason).toBe('Removed by admin');
+    });
+
+    it('still applies a verdict to a line trim has dropped from the window', () => {
+      // The check can outlive the buffer window; the publish path holds the
+      // same reference, so the verdict has to land on the object regardless.
+      const buffer = new TranscriptBuffer();
+      const line = buffer.reserve('Old line', 1000);
+      buffer.append('Much later line', 1000 + 11 * 60 * 1000);
+
+      expect(buffer.getRecent(1000 + 11 * 60 * 1000).map((l) => l.english)).toEqual(['Much later line']);
+      buffer.applyVerdict(line, { suppressed: true, reason: 'misheard' });
+      expect(line.suppressed).toBe(true);
+      expect(line.unverified).toBeUndefined();
+    });
+  });
 });

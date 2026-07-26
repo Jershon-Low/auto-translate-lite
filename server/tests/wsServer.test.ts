@@ -2407,7 +2407,7 @@ describe('wsServer', () => {
   });
 
   describe('segment processing order', () => {
-    it('processes segments strictly in arrival order even if a later segment finishes its Gemini calls first', async () => {
+    it('emits segments strictly in arrival order even if a later segment finishes its Gemini calls first', async () => {
       let resolveFirst!: (value: { text: string }) => void;
       const firstPending = new Promise<{ text: string }>((resolve) => {
         resolveFirst = resolve;
@@ -2431,24 +2431,239 @@ describe('wsServer', () => {
       captureSocket.send(JSON.stringify({ type: 'start' }));
       await waitForMessage(captureSocket); // status: recording
 
+      const transcripts: string[] = [];
+      captureSocket.on('message', (data) => {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'transcript') transcripts.push(message.english);
+      });
+
       // Fired back-to-back with no await in between, matching the real
       // fire-and-forget `onFinalSegment` callback wiring.
       capturedCallbacks!.onFinalSegment('First segment');
       capturedCallbacks!.onFinalSegment('Second segment');
 
-      // Give the second segment's (fast) Gemini call a chance to resolve and
-      // be processed while the first segment's call is still pending.
+      // Give the second segment's (fast) Gemini call a chance to resolve while
+      // the first segment's call is still pending.
       await new Promise((resolve) => setTimeout(resolve, 30));
 
-      // Without serialization, "Second segment" would already be appended
-      // here even though "First segment" arrived first and hasn't finished.
-      expect(session.buffer.getRecent()).toHaveLength(0);
+      // Both segments hold their arrival-ordered buffer slot immediately — that
+      // reservation is what lets the checks run concurrently — but neither has
+      // been emitted, because the first one's check is still in flight.
+      expect(session.buffer.getRecent().map((line) => line.english)).toEqual(['First segment', 'Second segment']);
+      expect(session.buffer.getRecent().every((line) => line.unverified)).toBe(true);
+      expect(transcripts).toEqual([]);
 
       resolveFirst({ text: '{"safe":true,"reason":"ok"}' });
       await new Promise((resolve) => setTimeout(resolve, 30));
 
-      const lines = session.buffer.getRecent().map((line) => line.english);
-      expect(lines).toEqual(['First segment', 'Second segment']);
+      // Released in arrival order despite finishing out of order.
+      expect(transcripts).toEqual(['First segment', 'Second segment']);
+      expect(session.buffer.getRecent().some((line) => line.unverified)).toBe(false);
+
+      captureSocket.close();
+    });
+
+    it('starts a later segment\'s transcription check without waiting for an earlier one to finish', async () => {
+      // The regression this whole split exists to prevent: the ingest queue
+      // used to await each check, so a slow check blocked every later segment
+      // from even starting one, and the backlog grew without bound.
+      const checked: string[] = [];
+      let resolveFirst!: (value: { text: string }) => void;
+      const firstPending = new Promise<{ text: string }>((resolve) => {
+        resolveFirst = resolve;
+      });
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        const match = /Line: "([^"]+)"/.exec(params.contents);
+        if (match) checked.push(match[1]);
+        if (params.contents.includes('Line: "Slow segment"')) return firstPending;
+        return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      capturedCallbacks!.onFinalSegment('Slow segment');
+      capturedCallbacks!.onFinalSegment('Next segment');
+      capturedCallbacks!.onFinalSegment('Third segment');
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      // All three checks are in flight at once. Serially they would be [Slow]
+      // alone, with the other two stuck behind it.
+      expect(checked).toEqual(['Slow segment', 'Next segment', 'Third segment']);
+
+      resolveFirst({ text: '{"safe":true,"reason":"ok"}' });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      captureSocket.close();
+    });
+
+    it('gives a later segment the earlier one as preceding context even while that check is in flight', async () => {
+      // Context is anchored on the reserved slot, not the buffer tail, so
+      // concurrency must not make a segment forget what preceded it.
+      const contexts = new Map<string, string>();
+      let resolveFirst!: (value: { text: string }) => void;
+      const firstPending = new Promise<{ text: string }>((resolve) => {
+        resolveFirst = resolve;
+      });
+
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        const match = /Line: "([^"]+)"/.exec(params.contents);
+        if (match) contexts.set(match[1], params.contents);
+        if (params.contents.includes('Line: "First segment"')) return firstPending;
+        return Promise.resolve({ text: '{"safe":true,"reason":"ok"}' });
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      capturedCallbacks!.onFinalSegment('First segment');
+      capturedCallbacks!.onFinalSegment('Second segment');
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(contexts.get('Second segment')).toContain('First segment');
+      expect(contexts.get('First segment')).not.toContain('Second segment');
+
+      resolveFirst({ text: '{"safe":true,"reason":"ok"}' });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      captureSocket.close();
+    });
+
+    it('keeps a segment awaiting its transcription check out of both backlog snapshots', async () => {
+      // An unverified line holds a buffer slot but has never been broadcast —
+      // it may yet be flagged, so a client joining mid-check must not see it.
+      let resolvePending!: (value: { text: string }) => void;
+      const pending = new Promise<{ text: string }>((resolve) => {
+        resolvePending = resolve;
+      });
+      const passThrough = (geminiClient.models.generateContent as any).getMockImplementation();
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        // Only the transcription check is held — translation must still work,
+        // or the viewer never gets the caption this test waits for.
+        if (params.contents.includes('transcription accuracy checker') && params.contents.includes('Line: "Unchecked line"')) {
+          return pending;
+        }
+        return passThrough(params);
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      capturedCallbacks!.onFinalSegment('Unchecked line');
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(session.buffer.getRecent()).toHaveLength(1);
+
+      const viewerSocket = new WebSocket(`ws://localhost:${port}/ws/viewer`);
+      await waitForOpen(viewerSocket);
+      viewerSocket.send(JSON.stringify({ type: 'subscribe', language: 'zh' }));
+      expect((await waitForMessage(viewerSocket)).lines).toEqual([]);
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
+      const reviewBacklog = waitForMessage(reviewSocket);
+      await waitForOpen(reviewSocket);
+      expect((await reviewBacklog).lines).toEqual([]);
+
+      // Once the check lands it reaches both of them the normal way.
+      const captionPromise = waitForMessage(viewerSocket);
+      resolvePending({ text: '{"safe":true,"reason":"ok"}' });
+      expect((await captionPromise).english).toBe('Unchecked line');
+
+      viewerSocket.close();
+      reviewSocket.close();
+      captureSocket.close();
+    });
+
+    it('does not resurrect a line an admin removed while its transcription check was in flight', async () => {
+      let resolvePending!: (value: { text: string }) => void;
+      const pending = new Promise<{ text: string }>((resolve) => {
+        resolvePending = resolve;
+      });
+      const passThrough = (geminiClient.models.generateContent as any).getMockImplementation();
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker') && params.contents.includes('Line: "Doomed line"')) {
+          return pending;
+        }
+        return passThrough(params);
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      capturedCallbacks!.onFinalSegment('Doomed line');
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const lineId = session.buffer.getRecent()[0].id;
+
+      const reviewSocket = new WebSocket(`ws://localhost:${port}/ws/review?passcode=test-passcode`);
+      const reviewBacklog = waitForMessage(reviewSocket);
+      await waitForOpen(reviewSocket);
+      await reviewBacklog;
+      reviewSocket.send(JSON.stringify({ type: 'admin-remove', id: lineId }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      const transcripts: unknown[] = [];
+      captureSocket.on('message', (data) => {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'transcript') transcripts.push(message);
+      });
+
+      // A `safe` verdict arriving after the removal must not undo it, nor
+      // re-broadcast a line the operator already saw removed.
+      resolvePending({ text: '{"safe":true,"reason":"ok"}' });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(transcripts).toEqual([]);
+      expect(session.buffer.getRecent()[0].suppressed).toBe(true);
+      expect(session.buffer.getRecent()[0].unverified).toBeUndefined();
+
+      reviewSocket.close();
+      captureSocket.close();
+    });
+
+    it('publishes unchecked rather than blocking the queue when a transcription check hangs', async () => {
+      // Safety valve. A check that hangs outright is already in flight, so
+      // shedding cannot help — without this bound it would block every segment
+      // queued behind it, which is the exact failure the concurrency split
+      // exists to remove.
+      deps.maxPublishLagMs = 60;
+
+      const passThrough = (geminiClient.models.generateContent as any).getMockImplementation();
+      (geminiClient.models.generateContent as any).mockImplementation((params: { contents: string }) => {
+        if (params.contents.includes('transcription accuracy checker') && params.contents.includes('Line: "Hung line"')) {
+          return new Promise(() => {}); // never resolves
+        }
+        return passThrough(params);
+      });
+
+      const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+      await waitForOpen(captureSocket);
+      captureSocket.send(JSON.stringify({ type: 'start' }));
+      await waitForMessage(captureSocket); // status: recording
+
+      const transcripts: string[] = [];
+      captureSocket.on('message', (data) => {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'transcript') transcripts.push(message.english);
+      });
+
+      capturedCallbacks!.onFinalSegment('Hung line');
+      capturedCallbacks!.onFinalSegment('Following line');
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      // Still inside the deadline: nothing emitted yet, order still held.
+      expect(transcripts).toEqual([]);
+
+      await new Promise((resolve) => setTimeout(resolve, 80)); // past the deadline
+
+      // The hung line publishes unchecked and the one behind it is released
+      // too — neither is stranded behind a check that will never return.
+      expect(transcripts).toEqual(['Hung line', 'Following line']);
 
       captureSocket.close();
     });
