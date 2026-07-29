@@ -413,6 +413,15 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
         if (!isBinary) {
           const message = JSON.parse(data.toString());
           if (message.type === 'start') {
+            // A second 'start' on the same socket must not orphan the first
+            // Deepgram connection — it stays open and billing otherwise.
+            if (deepgramConnection) {
+              deepgramConnection.finish();
+              deepgramConnection = null;
+              deepgramReady = false;
+              resetAudioBuffering();
+            }
+
             deps.session.start();
 
             const sermonText = deps.sermonDocStore.get() ?? '';

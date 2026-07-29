@@ -271,6 +271,37 @@ describe('wsServer', () => {
     captureSocket.close();
   });
 
+  it('finishes the previous Deepgram connection when a second start arrives', async () => {
+    // Observed twice in production (25 Jul 14:15:20/14:15:32, 26 Jul
+    // 05:01:18/05:05:51): a second 'start' replaced deepgramConnection without
+    // finishing the first, leaking a live Deepgram socket for the rest of the
+    // process.
+    const connections: { send: ReturnType<typeof vi.fn>; finish: ReturnType<typeof vi.fn> }[] = [];
+    deps.createDeepgramConnection = (_apiKey, _callbacks) => {
+      const connection = { send: vi.fn(), finish: vi.fn() };
+      connections.push(connection);
+      return connection;
+    };
+
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket);
+
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+    expect(connections).toHaveLength(1);
+    const first = connections[0];
+
+    // Simulate a client auto-reconnect: it re-sends 'start' on the same
+    // socket without an intervening 'stop'.
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+    expect(connections).toHaveLength(2);
+
+    expect(first.finish).toHaveBeenCalledTimes(1);
+
+    captureSocket.close();
+  });
+
   it('broadcasts a translated caption to a subscribed viewer', async () => {
     const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);
