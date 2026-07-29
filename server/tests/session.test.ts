@@ -3,11 +3,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Session.start()/stop() drive the log-file store; pinning LOG_FILE_PATH keeps
-// these unit tests from creating files under server/data/logs.
+// these unit tests from creating files under server/data/logs. Kept alongside
+// the mock below as a belt-and-braces guard.
 process.env.LOG_FILE_PATH = join(tmpdir(), 'auto-translate-lite-session-test-events.log');
+
+// Hoisted: replaces the real store with spies so the wiring test below can
+// assert start()/stop() actually call it, without touching disk.
+vi.mock('../src/logFiles', () => ({
+  logFiles: { openSession: vi.fn(), closeSession: vi.fn(), currentPath: () => '/dev/null' },
+}));
 
 import { WebSocket } from 'ws';
 import { Session } from '../src/session';
+import { logFiles } from '../src/logFiles';
 
 function fakeSocket(): WebSocket {
   return {} as WebSocket;
@@ -74,12 +82,18 @@ describe('Session', () => {
   });
 
   it('opens a log-file session on start and closes it on stop', () => {
+    const openSessionSpy = vi.mocked(logFiles.openSession);
+    const closeSessionSpy = vi.mocked(logFiles.closeSession);
+    openSessionSpy.mockClear();
+    closeSessionSpy.mockClear();
+
     const session = new Session();
     session.start();
+    expect(openSessionSpy).toHaveBeenCalledTimes(1);
+    expect(closeSessionSpy).not.toHaveBeenCalled();
+
     session.stop();
-    // With LOG_FILE_PATH pinned the store is inert; this asserts the calls
-    // exist and do not throw, which is what the wiring must guarantee.
-    expect(session.id).toEqual(expect.any(String));
+    expect(closeSessionSpy).toHaveBeenCalledTimes(1);
   });
 
   it('start() clears any previous role caches and providers', () => {
