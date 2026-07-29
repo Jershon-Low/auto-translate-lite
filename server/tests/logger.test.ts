@@ -66,13 +66,20 @@ describe('logEvent', () => {
     expect(typeof last?.timestamp).toBe('string');
   });
 
-  it('writes into the session file the log store reports as current', async () => {
+  it('appends to the path the log-file store reports as current', async () => {
+    vi.resetModules();
     tempDir = await mkdtemp(join(tmpdir(), 'logger-test-'));
-    const { createLogFileStore } = await import('../src/logFiles');
-    const store = createLogFileStore(tempDir, join(tempDir, 'events.log'));
-    store.openSession(Date.parse('2026-07-26T05:27:05.418Z'));
-    // logEvent resolves its target through the singleton; assert the contract
-    // the singleton implements rather than reaching into module state.
-    expect(store.currentPath()).toBe(join(tempDir, 'session-2026-07-26T15-27+1000.log'));
+    const target = join(tempDir, 'session-from-store.log');
+    vi.doMock('../src/logFiles', () => ({
+      logFiles: { currentPath: () => target },
+    }));
+    const { logEvent: freshLogEvent } = await import('../src/logger');
+
+    await freshLogEvent('info', { event: 'routed_through_store' });
+
+    const content = await readFile(target, 'utf-8');
+    expect(JSON.parse(content.trim()).event).toBe('routed_through_store');
+    vi.doUnmock('../src/logFiles');
+    vi.resetModules();
   });
 });
