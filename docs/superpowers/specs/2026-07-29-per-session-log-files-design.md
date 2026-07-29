@@ -79,14 +79,27 @@ export interface LogFileContents {
   unparseable: number;                   // lines that were not valid JSON
 }
 
-export function currentLogPath(): string;
-export function openSession(now?: number): void;
-export function closeSession(now?: number): void;
-export function listLogFiles(): Promise<LogFileInfo[]>;
-export function readLogFile(name: string): Promise<LogFileContents>;
-export function deleteLogFile(name: string): Promise<void>;
-export function resetForTests(): void;
+export interface LogFileStore {
+  currentPath(): string;
+  openSession(now?: number): void;
+  closeSession(now?: number): void;
+  initFromDisk(): Promise<void>;
+  activeName(): string | null;
+  list(): Promise<LogFileInfo[]>;
+  read(name: string): Promise<LogFileContents>;
+  remove(name: string): Promise<void>;
+  reset(): void;
+}
+
+export function createLogFileStore(dir: string, legacyPath: string): LogFileStore;
+export const logFiles: LogFileStore;   // process-wide singleton
 ```
+
+The factory-plus-singleton shape follows the codebase's existing
+`createFeedbackStore(path)` / `createModelConfigStore(path)` pattern. `logger.ts`
+and `session.ts` use the singleton — `logger.ts` already reaches for the
+`logHub` singleton the same way — while `app.ts` receives a store through
+`AppDeps`, so `app.test.ts` can inject one pointed at a temp directory.
 
 **State.** Two fields: `currentSessionFile: string | null` and
 `sessionStoppedAt: number | null` (null while a session is running).
@@ -115,11 +128,14 @@ from both the `'stop'` message handler and the capture socket's `'close'`
 handler, and commit `5669042` established that both can run for the same
 session. A `closeSession` when no session is open is a no-op.
 
-**Boot resumption.** On first use, the module reads the newest session file's
-last line and seeds `currentSessionFile` and `sessionStoppedAt` from its
-timestamp. A `pm2 restart` mid-service therefore resumes the same file, and so
-does a crash. This is the same lazy comparison as the reconnect case, so one
-rule covers both.
+**Boot resumption.** `initFromDisk()` reads the newest session file's last line
+and seeds `currentSessionFile` and `sessionStoppedAt` from its timestamp;
+`index.ts` awaits it once at startup, before the server listens. The resolution
+table above then does the rest — a `pm2 restart` mid-service resumes the same
+file, and so does a crash, through the same lazy comparison as the reconnect
+case. It is a separate explicit call rather than lazy initialisation because
+reading the tail is asynchronous while `currentPath()` must stay synchronous
+(`logEvent` resolves its target before awaiting the append).
 
 **Escape hatch.** If `process.env.LOG_FILE_PATH` is set, `currentLogPath()`
 returns it and no rotation happens. This preserves today's single-file
