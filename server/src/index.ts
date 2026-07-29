@@ -104,6 +104,7 @@ const app = createApp({
   promptConfigStore,
   openRouterModelsStore,
   translationFlagDisplayStore,
+  logFiles,
   adminPasscode: process.env.ADMIN_PASSCODE,
 });
 const httpServer = createServer(app);
