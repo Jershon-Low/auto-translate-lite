@@ -4,6 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createViewerFeedbackStore } from '../src/viewerFeedbackStore';
 
+// createViewerFeedbackStore logs a warn event through logEvent on a corrupt
+// file; pinning LOG_FILE_PATH keeps that from writing into server/data/logs.
+process.env.LOG_FILE_PATH = join(tmpdir(), 'auto-translate-lite-test-events.log');
+
 describe('createViewerFeedbackStore', () => {
   let tempDir: string;
 

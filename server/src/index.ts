@@ -4,6 +4,7 @@ import { createApp } from './app.js';
 import { attachWsServer } from './wsServer.js';
 import { Session } from './session.js';
 import { logHub } from './logHub.js';
+import { logFiles } from './logFiles.js';
 import { createGeminiClient } from './gemini.js';
 import { createDeepgramConnection } from './deepgram.js';
 import { createSermonDocStore } from './sermonDocStore.js';
@@ -137,6 +138,10 @@ attachWsServer({
   maxPublishLagMs: process.env.MAX_PUBLISH_LAG_MS ? Number(process.env.MAX_PUBLISH_LAG_MS) : 8000,
   maxCorrectionLagMs: process.env.MAX_CORRECTION_LAG_MS ? Number(process.env.MAX_CORRECTION_LAG_MS) : 30000,
 });
+
+// Seed the store from disk so a restart mid-service resumes the same file
+// instead of splitting the session across two logs.
+await logFiles.initFromDisk();
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;
 httpServer.listen(port, () => {

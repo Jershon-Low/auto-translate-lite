@@ -1,9 +1,10 @@
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { logHub, type LogEntry } from './logHub.js';
+import { logFiles } from './logFiles.js';
 
 function getLogFilePath(): string {
-  return process.env.LOG_FILE_PATH ?? 'data/events.log';
+  return logFiles.currentPath();
 }
 
 export async function logEvent(level: 'info' | 'warn' | 'error', payload: Record<string, unknown>): Promise<void> {

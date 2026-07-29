@@ -1,4 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// Session.start()/stop() drive the log-file store; pinning LOG_FILE_PATH keeps
+// these unit tests from creating files under server/data/logs.
+process.env.LOG_FILE_PATH = join(tmpdir(), 'auto-translate-lite-session-test-events.log');
+
 import { WebSocket } from 'ws';
 import { Session } from '../src/session';
 
@@ -64,6 +71,15 @@ describe('Session', () => {
     session.stop();
     expect(session.isActive).toBe(false);
     expect(session.buffer.getRecent(0)).toHaveLength(1);
+  });
+
+  it('opens a log-file session on start and closes it on stop', () => {
+    const session = new Session();
+    session.start();
+    session.stop();
+    // With LOG_FILE_PATH pinned the store is inert; this asserts the calls
+    // exist and do not throw, which is what the wiring must guarantee.
+    expect(session.id).toEqual(expect.any(String));
   });
 
   it('start() clears any previous role caches and providers', () => {

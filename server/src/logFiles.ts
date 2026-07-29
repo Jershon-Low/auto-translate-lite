@@ -297,3 +297,7 @@ export function createLogFileStore(dir: string, legacyPath: string): LogFileStor
     },
   };
 }
+
+// Process-wide singleton: logger.ts resolves its append target through this,
+// session.ts opens and closes it, index.ts seeds it from disk at boot.
+export const logFiles = createLogFileStore('data/logs', 'data/events.log');

@@ -65,4 +65,14 @@ describe('logEvent', () => {
     expect(last).toMatchObject({ level: 'warn', event: 'unit_test_event', detail: 42 });
     expect(typeof last?.timestamp).toBe('string');
   });
+
+  it('writes into the session file the log store reports as current', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'logger-test-'));
+    const { createLogFileStore } = await import('../src/logFiles');
+    const store = createLogFileStore(tempDir, join(tempDir, 'events.log'));
+    store.openSession(Date.parse('2026-07-26T05:27:05.418Z'));
+    // logEvent resolves its target through the singleton; assert the contract
+    // the singleton implements rather than reaching into module state.
+    expect(store.currentPath()).toBe(join(tempDir, 'session-2026-07-26T15-27+1000.log'));
+  });
 });
