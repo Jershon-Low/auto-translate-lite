@@ -2,7 +2,15 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createLogFileStore, melbourneStamp, GRACE_MS } from '../src/logFiles';
+import {
+  createLogFileStore,
+  melbourneStamp,
+  GRACE_MS,
+  MAX_ENTRIES_RETURNED,
+  LogFileNameError,
+  LogFileActiveError,
+  LogFileProtectedError,
+} from '../src/logFiles';
 
 let dir: string;
 
@@ -276,5 +284,81 @@ describe('initFromDisk', () => {
     const s = store();
     await s.initFromDisk();
     expect(s.currentPath()).toBe('/tmp/pinned.log');
+  });
+});
+
+describe('read', () => {
+  it('parses NDJSON entries in file order', async () => {
+    await writeFile(
+      join(dir, 'server.log'),
+      entryLine('2026-07-27T01:00:00.000Z', 'first') + entryLine('2026-07-27T01:00:01.000Z', 'second')
+    );
+    const contents = await store().read('server.log');
+    expect(contents.entries.map((entry) => entry.event)).toEqual(['first', 'second']);
+    expect(contents).toMatchObject({ total: 2, skipped: 0, unparseable: 0 });
+  });
+
+  it('keeps only the newest MAX_ENTRIES_RETURNED and reports how many it skipped', async () => {
+    const lines: string[] = [];
+    for (let index = 0; index < MAX_ENTRIES_RETURNED + 5; index += 1) {
+      lines.push(entryLine('2026-07-27T01:00:00.000Z', `e${index}`));
+    }
+    await writeFile(join(dir, 'server.log'), lines.join(''));
+    const contents = await store().read('server.log');
+    expect(contents.entries).toHaveLength(MAX_ENTRIES_RETURNED);
+    expect(contents.total).toBe(MAX_ENTRIES_RETURNED + 5);
+    expect(contents.skipped).toBe(5);
+    // The newest are the ones kept.
+    expect(contents.entries.at(-1)?.event).toBe(`e${MAX_ENTRIES_RETURNED + 4}`);
+  });
+
+  it('counts unparseable lines instead of failing the whole read', async () => {
+    await writeFile(join(dir, 'server.log'), entryLine('2026-07-27T01:00:00.000Z', 'ok') + '{"broken\n');
+    const contents = await store().read('server.log');
+    expect(contents.entries).toHaveLength(1);
+    expect(contents.unparseable).toBe(1);
+    expect(contents.total).toBe(2);
+  });
+
+  it('reads the legacy file from its own path', async () => {
+    await writeFile(join(dir, 'events.log'), entryLine('2026-07-18T00:00:00.000Z', 'legacy_event'));
+    const contents = await store().read('events.log');
+    expect(contents.entries[0].event).toBe('legacy_event');
+  });
+
+  it.each(['../../etc/passwd', 'session-x.log/../../secret', '/etc/passwd', 'other.log', 'session-x.txt'])(
+    'rejects the unsafe name %s',
+    async (name) => {
+      await expect(store().read(name)).rejects.toBeInstanceOf(LogFileNameError);
+    }
+  );
+
+  it('propagates ENOENT for a well-formed name that does not exist', async () => {
+    await expect(store().read('session-2026-07-26T15-27+1000.log')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('remove', () => {
+  it('deletes a past session file', async () => {
+    await writeFile(join(dir, 'session-2026-07-26T15-27+1000.log'), entryLine('2026-07-26T05:27:05.418Z', 'x'));
+    const s = store();
+    await s.remove('session-2026-07-26T15-27+1000.log');
+    expect(await s.list()).toEqual([]);
+  });
+
+  it('refuses to delete the running session', async () => {
+    const s = store();
+    s.openSession(Date.parse('2026-07-26T05:27:05.418Z'));
+    await writeFile(join(dir, 'session-2026-07-26T15-27+1000.log'), entryLine('2026-07-26T05:27:05.418Z', 'x'));
+    await expect(s.remove('session-2026-07-26T15-27+1000.log')).rejects.toBeInstanceOf(LogFileActiveError);
+  });
+
+  it('refuses to delete the legacy file', async () => {
+    await writeFile(join(dir, 'events.log'), entryLine('2026-07-18T00:00:00.000Z', 'x'));
+    await expect(store().remove('events.log')).rejects.toBeInstanceOf(LogFileProtectedError);
+  });
+
+  it('rejects an unsafe name', async () => {
+    await expect(store().remove('../../etc/passwd')).rejects.toBeInstanceOf(LogFileNameError);
   });
 });

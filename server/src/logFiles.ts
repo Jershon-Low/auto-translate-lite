@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { open, readdir, stat } from 'node:fs/promises';
+import { open, readdir, readFile, stat, unlink } from 'node:fs/promises';
+import type { LogEntry } from './logHub.js';
 
 // A session's log file stays current for a short window after the session
 // stops, so a capture-device dropout (which fires session.stop() via the
@@ -10,6 +11,39 @@ export const MAX_ENTRIES_RETURNED = 20_000;
 
 const SERVER_LOG = 'server.log';
 const TAIL_BYTES = 64 * 1024;
+
+// Only these three shapes are addressable. The character class excludes '.'
+// and '/', so '..' and absolute paths cannot appear — an admin passcode must
+// not become a way to read arbitrary files off the box.
+const NAME_PATTERN = /^(session-[A-Za-z0-9+-]+\.log|server\.log|events\.log)$/;
+
+export class LogFileNameError extends Error {
+  constructor(name: string) {
+    super(`unknown log file: ${name}`);
+    this.name = 'LogFileNameError';
+  }
+}
+
+export class LogFileActiveError extends Error {
+  constructor(name: string) {
+    super(`log file is the running session: ${name}`);
+    this.name = 'LogFileActiveError';
+  }
+}
+
+export class LogFileProtectedError extends Error {
+  constructor(name: string) {
+    super(`log file cannot be deleted: ${name}`);
+    this.name = 'LogFileProtectedError';
+  }
+}
+
+export interface LogFileContents {
+  entries: LogEntry[];
+  total: number;
+  skipped: number;
+  unparseable: number;
+}
 
 // Melbourne wall-clock sorts chronologically, reads correctly over SSH, and
 // the explicit offset disambiguates the repeated hour at the April DST
@@ -111,6 +145,8 @@ export interface LogFileStore {
   reset(): void;
   initFromDisk(): Promise<void>;
   list(): Promise<LogFileInfo[]>;
+  read(name: string): Promise<LogFileContents>;
+  remove(name: string): Promise<void>;
 }
 
 export function createLogFileStore(dir: string, legacyPath: string): LogFileStore {
@@ -139,6 +175,11 @@ export function createLogFileStore(dir: string, legacyPath: string): LogFileStor
   function activeNameOf(): string | null {
     if (pinnedPath()) return null;
     return currentSessionFile && sessionStoppedAt === null ? currentSessionFile : null;
+  }
+
+  function resolveName(name: string): string {
+    if (!NAME_PATTERN.test(name)) throw new LogFileNameError(name);
+    return name === 'events.log' ? legacyPath : join(dir, name);
   }
 
   return {
@@ -229,6 +270,30 @@ export function createLogFileStore(dir: string, legacyPath: string): LogFileStor
         if (b.startedAt === null) return -1;
         return Date.parse(b.startedAt) - Date.parse(a.startedAt);
       });
+    },
+
+    async read(name) {
+      const text = await readFile(resolveName(name), 'utf-8');
+      const lines = text.split('\n').filter((line) => line.trim().length > 0);
+      const total = lines.length;
+      const kept = lines.slice(Math.max(0, total - MAX_ENTRIES_RETURNED));
+      const entries: LogEntry[] = [];
+      let unparseable = 0;
+      for (const line of kept) {
+        try {
+          entries.push(JSON.parse(line) as LogEntry);
+        } catch {
+          unparseable += 1;
+        }
+      }
+      return { entries, total, skipped: total - kept.length, unparseable };
+    },
+
+    async remove(name) {
+      if (name === 'events.log') throw new LogFileProtectedError(name);
+      const path = resolveName(name);
+      if (name === activeNameOf()) throw new LogFileActiveError(name);
+      await unlink(path);
     },
   };
 }
