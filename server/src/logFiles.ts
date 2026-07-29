@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { open, readdir } from 'node:fs/promises';
+import { open, readdir, stat } from 'node:fs/promises';
 
 // A session's log file stays current for a short window after the session
 // stops, so a capture-device dropout (which fires session.stop() via the
@@ -80,6 +80,11 @@ function entryTimestamp(line: string | null): number | null {
   }
 }
 
+function entryTimestampIso(line: string | null): string | null {
+  const ms = entryTimestamp(line);
+  return ms === null ? null : new Date(ms).toISOString();
+}
+
 async function sessionFileNames(dir: string): Promise<string[]> {
   try {
     const names = await readdir(dir);
@@ -89,6 +94,15 @@ async function sessionFileNames(dir: string): Promise<string[]> {
   }
 }
 
+export interface LogFileInfo {
+  name: string;
+  kind: 'session' | 'server' | 'legacy';
+  startedAt: string | null;
+  endedAt: string | null;
+  bytes: number;
+  active: boolean;
+}
+
 export interface LogFileStore {
   currentPath(now?: number): string;
   openSession(now?: number): void;
@@ -96,11 +110,10 @@ export interface LogFileStore {
   activeName(): string | null;
   reset(): void;
   initFromDisk(): Promise<void>;
+  list(): Promise<LogFileInfo[]>;
 }
 
 export function createLogFileStore(dir: string, legacyPath: string): LogFileStore {
-  void legacyPath; // used from Task 3 (list) onward
-
   let currentSessionFile: string | null = null;
   let sessionStoppedAt: number | null = null;
 
@@ -121,6 +134,11 @@ export function createLogFileStore(dir: string, legacyPath: string): LogFileStor
       suffix += 1;
     }
     return name;
+  }
+
+  function activeNameOf(): string | null {
+    if (pinnedPath()) return null;
+    return currentSessionFile && sessionStoppedAt === null ? currentSessionFile : null;
   }
 
   return {
@@ -153,8 +171,7 @@ export function createLogFileStore(dir: string, legacyPath: string): LogFileStor
     },
 
     activeName() {
-      if (pinnedPath()) return null;
-      return currentSessionFile && sessionStoppedAt === null ? currentSessionFile : null;
+      return activeNameOf();
     },
 
     reset() {
@@ -173,6 +190,45 @@ export function createLogFileStore(dir: string, legacyPath: string): LogFileStor
       // comparison in currentPath() then decides whether to resume.
       currentSessionFile = newest;
       sessionStoppedAt = stoppedAt;
+    },
+
+    async list() {
+      const active = activeNameOf();
+      const candidates: { name: string; kind: LogFileInfo['kind']; path: string }[] = [];
+      for (const name of await sessionFileNames(dir)) {
+        candidates.push({ name, kind: 'session', path: join(dir, name) });
+      }
+      candidates.push({ name: SERVER_LOG, kind: 'server', path: join(dir, SERVER_LOG) });
+      candidates.push({ name: 'events.log', kind: 'legacy', path: legacyPath });
+
+      const files: LogFileInfo[] = [];
+      for (const candidate of candidates) {
+        let bytes: number;
+        try {
+          bytes = (await stat(candidate.path)).size;
+        } catch {
+          continue; // server.log or the legacy file may simply not exist
+        }
+        const first = entryTimestampIso(await firstLine(candidate.path));
+        const last = entryTimestampIso(await lastLine(candidate.path));
+        files.push({
+          name: candidate.name,
+          kind: candidate.kind,
+          startedAt: first,
+          endedAt: last,
+          bytes,
+          active: candidate.name === active,
+        });
+      }
+
+      // Newest first; a file with no readable first entry sorts last rather
+      // than jumping to the top on a null comparison.
+      return files.sort((a, b) => {
+        if (a.startedAt === null && b.startedAt === null) return a.name.localeCompare(b.name);
+        if (a.startedAt === null) return 1;
+        if (b.startedAt === null) return -1;
+        return Date.parse(b.startedAt) - Date.parse(a.startedAt);
+      });
     },
   };
 }

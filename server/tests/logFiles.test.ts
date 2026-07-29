@@ -135,6 +135,86 @@ function melbourneSessionName(ms: number): string {
   return `session-${melbourneStamp(ms)}.log`;
 }
 
+import { stat } from 'node:fs/promises';
+
+function entryLine(timestamp: string, event: string): string {
+  return JSON.stringify({ timestamp, level: 'info', event }) + '\n';
+}
+
+describe('list', () => {
+  it('returns an empty array when the directory does not exist', async () => {
+    const s = createLogFileStore(join(dir, 'missing'), join(dir, 'nope.log'));
+    expect(await s.list()).toEqual([]);
+  });
+
+  it('reports start and end from the first and last entries', async () => {
+    await writeFile(
+      join(dir, 'session-2026-07-26T15-27+1000.log'),
+      entryLine('2026-07-26T05:27:05.418Z', 'dg_diag_open') +
+        entryLine('2026-07-26T06:00:00.000Z', 'caption_corrected') +
+        entryLine('2026-07-26T07:07:45.006Z', 'dg_diag_close')
+    );
+    const [file] = await store().list();
+    expect(file.name).toBe('session-2026-07-26T15-27+1000.log');
+    expect(file.kind).toBe('session');
+    expect(file.startedAt).toBe('2026-07-26T05:27:05.418Z');
+    expect(file.endedAt).toBe('2026-07-26T07:07:45.006Z');
+    expect(file.bytes).toBe((await stat(join(dir, 'session-2026-07-26T15-27+1000.log'))).size);
+    expect(file.active).toBe(false);
+  });
+
+  it('reports a single-entry file with equal start and end', async () => {
+    await writeFile(join(dir, 'session-2026-07-26T15-27+1000.log'), entryLine('2026-07-26T05:27:05.418Z', 'dg_diag_open'));
+    const [file] = await store().list();
+    expect(file.startedAt).toBe('2026-07-26T05:27:05.418Z');
+    expect(file.endedAt).toBe('2026-07-26T05:27:05.418Z');
+  });
+
+  it('reports an empty file with null timestamps rather than failing the listing', async () => {
+    await writeFile(join(dir, 'session-2026-07-26T15-27+1000.log'), '');
+    const [file] = await store().list();
+    expect(file.startedAt).toBeNull();
+    expect(file.endedAt).toBeNull();
+    expect(file.bytes).toBe(0);
+  });
+
+  it('sorts newest first, with unknown-start files last', async () => {
+    await writeFile(join(dir, 'session-2026-07-25T09-00+1000.log'), entryLine('2026-07-24T23:00:00.000Z', 'dg_diag_open'));
+    await writeFile(join(dir, 'session-2026-07-26T15-27+1000.log'), entryLine('2026-07-26T05:27:05.418Z', 'dg_diag_open'));
+    await writeFile(join(dir, 'session-2026-07-27T09-42+1000.log'), '');
+    const names = (await store().list()).map((file) => file.name);
+    expect(names).toEqual([
+      'session-2026-07-26T15-27+1000.log',
+      'session-2026-07-25T09-00+1000.log',
+      'session-2026-07-27T09-42+1000.log',
+    ]);
+  });
+
+  it('includes server.log and the legacy file with their own kinds', async () => {
+    await writeFile(join(dir, 'server.log'), entryLine('2026-07-27T01:00:00.000Z', 'cost_file_load_failed'));
+    await writeFile(join(dir, 'events.log'), entryLine('2026-07-18T00:00:00.000Z', 'dg_diag_open'));
+    const kinds = Object.fromEntries((await store().list()).map((file) => [file.name, file.kind]));
+    expect(kinds).toEqual({ 'server.log': 'server', 'events.log': 'legacy' });
+  });
+
+  it('omits the legacy file when it does not exist', async () => {
+    await writeFile(join(dir, 'server.log'), entryLine('2026-07-27T01:00:00.000Z', 'x'));
+    expect((await store().list()).map((file) => file.name)).toEqual(['server.log']);
+  });
+
+  it('marks only the running session as active', async () => {
+    const s = store();
+    s.openSession(Date.parse('2026-07-26T05:27:05.418Z'));
+    await writeFile(join(dir, 'session-2026-07-26T15-27+1000.log'), entryLine('2026-07-26T05:27:05.418Z', 'dg_diag_open'));
+    await writeFile(join(dir, 'session-2026-07-25T09-00+1000.log'), entryLine('2026-07-24T23:00:00.000Z', 'dg_diag_open'));
+    const active = Object.fromEntries((await s.list()).map((file) => [file.name, file.active]));
+    expect(active).toEqual({
+      'session-2026-07-26T15-27+1000.log': true,
+      'session-2026-07-25T09-00+1000.log': false,
+    });
+  });
+});
+
 describe('initFromDisk', () => {
   it('resumes the newest session file when its last entry is inside the grace window', async () => {
     const recent = new Date(Date.now() - 30_000).toISOString();
