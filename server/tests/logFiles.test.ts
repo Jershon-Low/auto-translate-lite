@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createLogFileStore, melbourneStamp, GRACE_MS } from '../src/logFiles';
@@ -134,3 +134,67 @@ describe('LOG_FILE_PATH override', () => {
 function melbourneSessionName(ms: number): string {
   return `session-${melbourneStamp(ms)}.log`;
 }
+
+describe('initFromDisk', () => {
+  it('resumes the newest session file when its last entry is inside the grace window', async () => {
+    const recent = new Date(Date.now() - 30_000).toISOString();
+    await writeFile(
+      join(dir, 'session-2026-07-26T15-27+1000.log'),
+      JSON.stringify({ timestamp: recent, level: 'info', event: 'dg_diag_open' }) + '\n'
+    );
+    const s = store();
+    await s.initFromDisk();
+    // A pm2 restart mid-service must keep writing to the same file.
+    expect(s.currentPath()).toBe(join(dir, 'session-2026-07-26T15-27+1000.log'));
+  });
+
+  it('does not resume a session whose last entry is older than the grace window', async () => {
+    const old = new Date(Date.now() - GRACE_MS * 4).toISOString();
+    await writeFile(
+      join(dir, 'session-2026-07-26T15-27+1000.log'),
+      JSON.stringify({ timestamp: old, level: 'info', event: 'dg_diag_close' }) + '\n'
+    );
+    const s = store();
+    await s.initFromDisk();
+    expect(s.currentPath()).toBe(join(dir, 'server.log'));
+  });
+
+  it('picks the newest of several session files', async () => {
+    const recent = new Date(Date.now() - 10_000).toISOString();
+    const old = new Date(Date.now() - GRACE_MS * 10).toISOString();
+    await writeFile(join(dir, 'session-2026-07-25T09-00+1000.log'), JSON.stringify({ timestamp: old, level: 'info' }) + '\n');
+    await writeFile(join(dir, 'session-2026-07-26T15-27+1000.log'), JSON.stringify({ timestamp: recent, level: 'info' }) + '\n');
+    const s = store();
+    await s.initFromDisk();
+    expect(s.currentPath()).toBe(join(dir, 'session-2026-07-26T15-27+1000.log'));
+  });
+
+  it('treats a corrupt tail as no resumable session', async () => {
+    await writeFile(join(dir, 'session-2026-07-26T15-27+1000.log'), '{"timestamp":"2026-07-2\n');
+    const s = store();
+    await s.initFromDisk();
+    expect(s.currentPath()).toBe(join(dir, 'server.log'));
+  });
+
+  it('treats an empty session file as no resumable session', async () => {
+    await writeFile(join(dir, 'session-2026-07-26T15-27+1000.log'), '');
+    const s = store();
+    await s.initFromDisk();
+    expect(s.currentPath()).toBe(join(dir, 'server.log'));
+  });
+
+  it('does nothing when the log directory does not exist yet', async () => {
+    const s = createLogFileStore(join(dir, 'missing'), join(dir, 'events.log'));
+    await expect(s.initFromDisk()).resolves.toBeUndefined();
+    expect(s.currentPath()).toBe(join(dir, 'missing', 'server.log'));
+  });
+
+  it('does nothing when LOG_FILE_PATH is set', async () => {
+    const recent = new Date().toISOString();
+    await writeFile(join(dir, 'session-2026-07-26T15-27+1000.log'), JSON.stringify({ timestamp: recent, level: 'info' }) + '\n');
+    process.env.LOG_FILE_PATH = '/tmp/pinned.log';
+    const s = store();
+    await s.initFromDisk();
+    expect(s.currentPath()).toBe('/tmp/pinned.log');
+  });
+});
