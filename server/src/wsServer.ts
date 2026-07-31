@@ -413,15 +413,6 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
         if (!isBinary) {
           const message = JSON.parse(data.toString());
           if (message.type === 'start') {
-            // A second 'start' on the same socket must not orphan the first
-            // Deepgram connection — it stays open and billing otherwise.
-            if (deepgramConnection) {
-              deepgramConnection.finish();
-              deepgramConnection = null;
-              deepgramReady = false;
-              resetAudioBuffering();
-            }
-
             deps.session.start();
 
             const sermonText = deps.sermonDocStore.get() ?? '';
@@ -461,9 +452,25 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
 
             audioChunkCount = 0;
             audioByteCount = 0;
+            // A second 'start' on the same socket (client reconnect) must not
+            // orphan the previous Deepgram connection — it stays open and
+            // billing otherwise, with no reference left to close it. Finish it
+            // right here at the swap, not earlier: audio keeps flowing to it
+            // through the awaits above (store reads + role-cache creation) via
+            // the still-current deepgramConnection/deepgramReady, so nothing is
+            // dropped into pendingAudio prematurely.
+            deepgramConnection?.finish();
             resetAudioBuffering();
-            deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
+            // The old connection's finish() above triggers its close
+            // asynchronously; if that close event lands after this new
+            // connection has already opened, its onClose must not clobber this
+            // connection's deepgramReady. Capture this connection in a local so
+            // its own callbacks can tell — via the shared deepgramConnection
+            // variable — whether they still belong to the current connection.
+            let newDeepgramConnection: DeepgramConnection | null = null;
+            newDeepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
               onOpen: () => {
+                if (deepgramConnection !== newDeepgramConnection) return;
                 deepgramReady = true;
                 flushPendingAudio();
               },
@@ -489,11 +496,13 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                 deps.session.broadcastToReview(errorPayload);
               },
               onClose: () => {
+                if (deepgramConnection !== newDeepgramConnection) return;
                 // Stop forwarding to a closed connection; further audio is held
                 // (capped) rather than sent into a dead socket.
                 deepgramReady = false;
               },
             });
+            deepgramConnection = newDeepgramConnection;
             recordingStartedAt = Date.now();
             deepgramCostFlushInterval = setInterval(recordElapsedDeepgramCost, deps.deepgramCostFlushIntervalMs);
             const recordingPayload = JSON.stringify({ type: 'status', status: 'recording' });
