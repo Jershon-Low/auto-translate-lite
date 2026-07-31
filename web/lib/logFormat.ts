@@ -17,16 +17,18 @@ const LANGUAGE_NAME = new Map(
   TARGET_LANGUAGES.map((language) => [language.code, /\(([^)]+)\)/.exec(language.label)?.[1] ?? language.label])
 );
 
-function languageName(code: unknown): string {
-  return typeof code === 'string' ? LANGUAGE_NAME.get(code) ?? code : String(code);
+function languageName(code: unknown): string | null {
+  return typeof code === 'string' ? LANGUAGE_NAME.get(code) ?? code : null;
 }
 
-function languageNames(codes: unknown): string {
-  return Array.isArray(codes) ? codes.map(languageName).join(', ') : languageName(codes);
+function languageNames(codes: unknown): string | null {
+  if (!Array.isArray(codes)) return null;
+  const names = codes.map((c) => languageName(c)).filter((n): n is string => n !== null);
+  return names.length > 0 ? names.join(', ') : null;
 }
 
-function seconds(ms: unknown): string {
-  return typeof ms === 'number' ? `${Math.round(ms / 100) / 10}s` : String(ms);
+function seconds(ms: unknown): string | null {
+  return typeof ms === 'number' ? `${Math.round(ms / 100) / 10}s` : null;
 }
 
 interface Phrasing {
@@ -56,14 +58,36 @@ const PHRASING: Record<string, Phrasing> = {
   transcription_flagged: { simple: true, text: () => "Line hidden — the transcription didn't make sense" },
   transcription_verify_timeout: { simple: true, text: () => 'Transcription check timed out — line shown unchecked' },
   transcription_verification_failed: { simple: true, text: (p) => `Transcription check failed — ${String(p.error ?? 'no detail given')}` },
-  translation_fallback: { simple: true, text: (p) => `${languageName(p.language)} translation rejected by the checker — showed English instead` },
-  translation_missing_language: { simple: true, text: (p) => `No ${languageNames(p.languages)} came back from the model — showed English instead` },
+  translation_fallback: { simple: true, text: (p) => {
+    const name = languageName(p.language);
+    return name ? `${name} translation rejected by the checker — showed English instead` : 'A translation was rejected by the checker — showed English instead';
+  } },
+  translation_missing_language: { simple: true, text: (p) => {
+    const names = languageNames(p.languages);
+    return names ? `No ${names} came back from the model — showed English instead` : 'No translation came back from the model — showed English instead';
+  } },
   translation_failed: { simple: true, text: (p) => `Translation failed — ${String(p.error ?? 'no detail given')}` },
   backlog_translation_failed: { simple: true, text: (p) => `Catch-up translation failed — ${String(p.error ?? 'no detail given')}` },
   verification_failed: { simple: true, text: (p) => `Translation check failed — ${String(p.error ?? 'no detail given')}` },
   caption_corrected: {
     simple: true,
-    text: (p) => `Caption updated with the final translation${Array.isArray(p.languages) ? ` (${languageNames(p.languages)})` : ''}`,
+    text: (p) => {
+      const outcome = String(p.outcome ?? '');
+      if (outcome === 'upgrade') {
+        const settled = languageNames(p.settledLanguages);
+        if (settled) return `Caption improved for most languages, but ${settled} still showing English`;
+        return 'Caption updated with the final translation';
+      }
+      if (outcome === 'settle') return 'No better translation arrived — line stays as shown';
+      if (outcome === 'bailed') {
+        const reason = String(p.reason ?? '');
+        if (reason === 'session_restarted') return 'Correction abandoned — session restarted';
+        if (reason === 'suppressed') return 'Correction abandoned — line was removed';
+        if (reason === 'text_edited') return 'Correction abandoned — line text was edited';
+        return 'Correction abandoned';
+      }
+      return 'Caption correction completed';
+    },
   },
   correction_failed: { simple: true, text: (p) => `Could not send the corrected caption — ${String(p.error ?? 'no detail given')}` },
   publish_failed: { simple: true, text: (p) => `Could not send a caption to viewers — ${String(p.error ?? 'no detail given')}` },
@@ -73,11 +97,20 @@ const PHRASING: Record<string, Phrasing> = {
   // caption_lag_shed is Detailed-only: ~2,300 fire in a bad service, and the
   // caption_corrected that follows each one already reports the outcome.
   caption_lag_shed: { simple: false, text: () => "Translation wasn't ready in time — showed English first" },
-  caption_backpressure_engaged: { simple: true, text: (p) => `Falling behind by ${seconds(p.lagMs)} — pausing catch-up work` },
+  caption_backpressure_engaged: { simple: true, text: (p) => {
+    const dur = seconds(p.lagMs);
+    return dur ? `Falling behind by ${dur} — pausing catch-up work` : 'Falling behind — pausing catch-up work';
+  } },
   caption_backpressure_disengaged: { simple: true, text: () => 'Caught up — catch-up work resumed' },
-  ingest_lag_high: { simple: true, text: (p) => `Transcription checker is running ${seconds(p.lagMs)} behind` },
+  ingest_lag_high: { simple: true, text: (p) => {
+    const dur = seconds(p.ingestWaitMs);
+    return dur ? `Transcription checker is running ${dur} behind` : 'Transcription checker is running behind';
+  } },
   ingest_lag_cleared: { simple: true, text: () => 'Transcription checker caught up' },
-  verify_lag_high: { simple: true, text: (p) => `Transcription checks are ${seconds(p.lagMs)} behind` },
+  verify_lag_high: { simple: true, text: (p) => {
+    const dur = seconds(p.verifyLagMs);
+    return dur ? `Transcription checks are ${dur} behind` : 'Transcription checks are running behind';
+  } },
   verify_lag_cleared: { simple: true, text: () => 'Transcription checks caught up' },
 
   // ── operator actions and plumbing ────────────────────────────────────
