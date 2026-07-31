@@ -411,6 +411,32 @@ describe('wsServer', () => {
     captureSocket.close();
   });
 
+  it('does not stop a session that a newer capture socket now owns when a stale socket finally closes', async () => {
+    // Mirrors the Deepgram-connection race above one layer up: a hard WiFi
+    // drop with no RST leaves the old TCP connection alive from the server's
+    // perspective. The browser reconnects and starts a new capture socket —
+    // which immediately claims session.captureSocket on accept — well before
+    // the first socket's connection actually times out and its close handler
+    // fires. That belated close must not stop the session the new socket owns.
+    const captureSocket1 = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket1);
+    captureSocket1.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket1); // status: recording
+    expect(session.isActive).toBe(true);
+
+    const captureSocket2 = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket2);
+
+    // The stale socket's close arrives late, well after the replacement has
+    // taken over captureSocket.
+    captureSocket1.close();
+    await delay(50);
+
+    expect(session.isActive).toBe(true);
+
+    captureSocket2.close();
+  });
+
   it('broadcasts a translated caption to a subscribed viewer', async () => {
     const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);

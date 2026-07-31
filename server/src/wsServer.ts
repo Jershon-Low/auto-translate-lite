@@ -567,8 +567,16 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
       audioByteCount,
       avgBytesPerChunk: audioChunkCount > 0 ? Math.round(audioByteCount / audioChunkCount) : 0,
     });
-    if (deps.session.captureSocket === ws) deps.session.captureSocket = null;
-    deps.session.stop();
+    // A stale socket's close can arrive after its replacement is already live
+    // (e.g. a hard WiFi drop with no RST: the browser reconnects and starts a
+    // new session before the old TCP connection finally times out). Guarding
+    // captureSocket alone used to be enough since isActive only fed one status
+    // string, but session.stop() now also closes the per-session log file via
+    // closeSession() — an unguarded call here would truncate a live session's
+    // log and drop its 409 delete guard the moment the stale close fires.
+    const wasCurrentSocket = deps.session.captureSocket === ws;
+    if (wasCurrentSocket) deps.session.captureSocket = null;
+    if (wasCurrentSocket) deps.session.stop();
     void clearAndDeleteRoleCaches(deps);
     deepgramConnection?.finish();
     resetAudioBuffering();
