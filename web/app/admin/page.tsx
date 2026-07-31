@@ -14,7 +14,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Textarea } from '@/components/ui/textarea';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import type { LogEntry as FormatLogEntry } from '@/lib/logFormat';
+import { formatEntry, collapseRuns, type LogEntry as FormatLogEntry, type LogRow } from '@/lib/logFormat';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001';
 const API_URL = WS_URL.replace(/^ws/, 'http');
@@ -79,6 +79,17 @@ const LEVEL_ROW_CLASS: Record<LogEntry['level'], string> = {
   warn: 'text-amber-600 dark:text-amber-400',
   error: 'text-red-600 dark:text-red-400',
 };
+
+// Severity as a border stripe as well as text colour: amber text alone
+// disappears the moment a row wraps.
+const SEVERITY_BORDER: Record<LogEntry['level'], string> = {
+  info: 'border-transparent',
+  warn: 'border-amber-400',
+  error: 'border-red-400',
+};
+const SEVERITY_GLYPH: Record<LogEntry['level'], string> = { info: '●', warn: '⚠', error: '✕' };
+
+type LogViewMode = 'simple' | 'detailed' | 'raw';
 
 function formatRawEntry(entry: LogEntry): string {
   const { timestamp, level, event, ...rest } = entry;
@@ -179,6 +190,9 @@ export default function AdminPage() {
   });
   const [logSearch, setLogSearch] = useState('');
   const [logsPaused, setLogsPaused] = useState(false);
+  const [logViewMode, setLogViewMode] = useState<LogViewMode>('simple');
+  const [expandedRuns, setExpandedRuns] = useState<Record<string, boolean>>({});
+  const [openPayload, setOpenPayload] = useState<string | null>(null);
 
   const [logFiles, setLogFiles] = useState<LogFileInfo[]>([]);
   const [selectedLog, setSelectedLog] = useState<string>('live');
@@ -207,15 +221,35 @@ export default function AdminPage() {
     });
   }, [logFiles, fromDate, sortNewestFirst]);
 
-  const visibleLogEntries = logEntries.filter((entry) => {
-    if (!levelFilter[entry.level]) return false;
-    const query = logSearch.trim().toLowerCase();
-    if (query.length > 0) {
-      const haystack = `${entry.event ?? ''} ${JSON.stringify(entry)}`.toLowerCase();
-      if (!haystack.includes(query)) return false;
+  // Live streams from the WS buffer; a historical selection reads the file
+  // loaded by the effect below. Both share the same LogEntry shape.
+  const sourceEntries: LogEntry[] = isLive ? logEntries : fileEntries;
+
+  const visibleLogRows = useMemo<LogRow[]>(() => {
+    const search = logSearch.trim().toLowerCase();
+    const kept = sourceEntries.filter((entry) => {
+      if (!levelFilter[entry.level]) return false;
+      if (logViewMode === 'simple' && !formatEntry(entry).simple) return false;
+      if (!search) return true;
+      return `${entry.event ?? ''} ${formatEntry(entry).text} ${JSON.stringify(entry)}`.toLowerCase().includes(search);
+    });
+    if (logViewMode !== 'simple') {
+      return kept.map((entry) => ({ kind: 'one' as const, entry, count: 1, from: entry.timestamp, to: entry.timestamp, items: [entry] }));
     }
-    return true;
-  });
+    return collapseRuns(kept);
+  }, [sourceEntries, levelFilter, logSearch, logViewMode]);
+
+  // Sum of row counts equals the filtered-entry count even in Simple mode,
+  // where a run row's `count` folds several entries into one row.
+  const matchedEntryCount = visibleLogRows.reduce((sum, row) => sum + row.count, 0);
+
+  function visibleLogText(): string {
+    return visibleLogRows
+      .map((row) => (logViewMode === 'raw'
+        ? formatRawEntry(row.entry)
+        : `${melbourneTimeLabel(row.entry.timestamp, true)}  ${formatEntry(row.entry).text}${row.kind === 'run' ? ` (×${row.count})` : ''}`))
+      .join('\n');
+  }
 
   useEffect(() => {
     const stored = window.sessionStorage.getItem('adminPasscode');
@@ -280,10 +314,12 @@ export default function AdminPage() {
   }, [authorized, passcode]);
 
   useEffect(() => {
-    if (logsPaused) return;
+    // Auto-follow-to-bottom is a live-tail concept; a historical file is
+    // being browsed, not tailed, so leave the scroll position alone.
+    if (!isLive || logsPaused) return;
     const el = logScrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [visibleLogEntries, logsPaused]);
+  }, [isLive, visibleLogRows, logsPaused]);
 
   const refreshLogFiles = useCallback(async () => {
     const response = await fetch(`${API_URL}/admin/logs`, { headers: { 'x-admin-passcode': passcode } });
@@ -482,18 +518,43 @@ export default function AdminPage() {
   }
 
   function copyLogs() {
-    void navigator.clipboard.writeText(visibleLogEntries.map(formatRawEntry).join('\n'));
+    void navigator.clipboard.writeText(visibleLogText());
     toast.success('Logs copied.');
   }
 
   function downloadLogs() {
-    const blob = new Blob([visibleLogEntries.map(formatRawEntry).join('\n')], { type: 'text/plain' });
+    const blob = new Blob([visibleLogText()], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
     anchor.download = `logs-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
     anchor.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function downloadRawLogFile() {
+    if (isLive) return;
+    try {
+      const response = await fetch(`${API_URL}/admin/logs/${encodeURIComponent(selectedLog)}`, {
+        headers: { 'x-admin-passcode': passcode },
+      });
+      if (!response.ok) {
+        toast.error('Could not download that log.');
+        return;
+      }
+      // The untouched response body, not the parsed-and-reformatted entries
+      // used on screen — this is the diagnostic escape hatch.
+      const raw = await response.text();
+      const blob = new Blob([raw], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${selectedLog.replace(/\.[^.]+$/, '')}-raw.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error('Could not download that log.');
+    }
   }
 
   function clearLogs() {
@@ -829,6 +890,14 @@ export default function AdminPage() {
 
           <div className="flex flex-wrap items-center gap-2">
             <ToggleGroup
+              value={[logViewMode]}
+              onValueChange={(values) => setLogViewMode(((values as string[])[0] ?? 'simple') as LogViewMode)}
+            >
+              <ToggleGroupItem value="simple" size="sm">Simple</ToggleGroupItem>
+              <ToggleGroupItem value="detailed" size="sm">Detailed</ToggleGroupItem>
+              <ToggleGroupItem value="raw" size="sm">Raw</ToggleGroupItem>
+            </ToggleGroup>
+            <ToggleGroup
               multiple
               value={(Object.keys(levelFilter) as LogEntry['level'][]).filter((level) => levelFilter[level])}
               onValueChange={(values) => {
@@ -836,9 +905,9 @@ export default function AdminPage() {
                 setLevelFilter({ info: active.has('info'), warn: active.has('warn'), error: active.has('error') });
               }}
             >
-              <ToggleGroupItem value="info" size="sm">Info</ToggleGroupItem>
-              <ToggleGroupItem value="warn" size="sm">Warn</ToggleGroupItem>
-              <ToggleGroupItem value="error" size="sm">Error</ToggleGroupItem>
+              <ToggleGroupItem value="info" size="sm">Normal</ToggleGroupItem>
+              <ToggleGroupItem value="warn" size="sm">Attention</ToggleGroupItem>
+              <ToggleGroupItem value="error" size="sm">Problems</ToggleGroupItem>
             </ToggleGroup>
             <Input
               value={logSearch}
@@ -846,12 +915,17 @@ export default function AdminPage() {
               placeholder="Filter…"
               className="h-8 w-40"
             />
-            <Button variant="secondary" size="sm" onClick={() => setLogsPaused((paused) => !paused)}>
+            <Button variant="secondary" size="sm" disabled={!isLive} onClick={() => setLogsPaused((paused) => !paused)}>
               {logsPaused ? 'Resume' : 'Pause'}
             </Button>
             <Button variant="secondary" size="sm" onClick={clearLogs}>Clear</Button>
             <Button variant="secondary" size="sm" onClick={copyLogs}>Copy</Button>
             <Button variant="secondary" size="sm" onClick={downloadLogs}>Download</Button>
+            {!isLive && (
+              <Button variant="secondary" size="sm" onClick={() => void downloadRawLogFile()}>
+                Download raw file
+              </Button>
+            )}
           </div>
           <div className="text-xs text-muted-foreground">
             {isLive ? (
@@ -859,7 +933,7 @@ export default function AdminPage() {
                 {logStatus === 'connected' ? 'Live' : logStatus === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}
                 {logsPaused ? ' · Paused' : ''}
                 {' · '}
-                {visibleLogEntries.length} / {logEntries.length} entries
+                {matchedEntryCount} / {sourceEntries.length} entries
               </>
             ) : fileLoading ? (
               'Loading…'
@@ -867,8 +941,8 @@ export default function AdminPage() {
               <span className="text-destructive">{fileError}</span>
             ) : fileMeta ? (
               <>
-                {fileMeta.total} entries
-                {fileMeta.skipped > 0 ? ` · ${fileMeta.skipped} skipped` : ''}
+                {matchedEntryCount} / {sourceEntries.length} entries loaded
+                {fileMeta.skipped > 0 ? ` (of ${fileMeta.total} in the file)` : ''}
                 {fileMeta.unparseable > 0 ? ` · ${fileMeta.unparseable} unparseable` : ''}
               </>
             ) : null}
@@ -877,11 +951,73 @@ export default function AdminPage() {
             ref={logScrollRef}
             className="h-[60vh] overflow-auto rounded-md border bg-muted/30 p-2 font-mono text-xs leading-relaxed"
           >
-            {visibleLogEntries.map((entry, index) => (
-              <div key={index} className={`whitespace-pre-wrap break-all ${LEVEL_ROW_CLASS[entry.level] ?? LEVEL_ROW_CLASS.info}`}>
-                {formatRawEntry(entry)}
+            {fileLoading && <div className="p-6 text-center text-muted-foreground">Loading…</div>}
+            {fileError && <div className="p-6 text-center text-red-400">{fileError}</div>}
+            {!fileLoading && !fileError && fileMeta && fileMeta.skipped > 0 && (
+              <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">
+                Showing the most recent {(fileMeta.total - fileMeta.skipped).toLocaleString()} of {fileMeta.total.toLocaleString()} entries.
               </div>
-            ))}
+            )}
+            {!fileLoading && !fileError && fileMeta && fileMeta.unparseable > 0 && (
+              <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">
+                {fileMeta.unparseable.toLocaleString()} line(s) could not be read and were skipped.
+              </div>
+            )}
+            {!fileLoading && !fileError && visibleLogRows.length === 0 && (
+              <div className="p-6 text-center text-muted-foreground">
+                Nothing matches those filters. Try turning a severity back on, or clearing the search.
+              </div>
+            )}
+            {!fileLoading && !fileError && visibleLogRows.map((row, index) => {
+              const key = `${row.entry.event ?? 'x'}-${row.from}-${index}`;
+              if (logViewMode === 'raw') {
+                return (
+                  <div key={key} className={`whitespace-pre-wrap break-all ${LEVEL_ROW_CLASS[row.entry.level] ?? LEVEL_ROW_CLASS.info}`}>
+                    {formatRawEntry(row.entry)}
+                  </div>
+                );
+              }
+              const formatted = formatEntry(row.entry);
+              const expanded = expandedRuns[key] ?? false;
+              return (
+                <div key={key}>
+                  <button
+                    type="button"
+                    onClick={() => (row.kind === 'run'
+                      ? setExpandedRuns((current) => ({ ...current, [key]: !expanded }))
+                      : setOpenPayload((current) => (current === key ? null : key)))}
+                    className={`flex w-full gap-2 border-l-2 px-2 py-1 text-left hover:bg-muted/40 ${SEVERITY_BORDER[row.entry.level]}`}
+                  >
+                    <span className="w-24 shrink-0 tabular-nums text-muted-foreground">
+                      {melbourneTimeLabel(row.entry.timestamp, true)}
+                    </span>
+                    <span className={`w-4 shrink-0 ${LEVEL_ROW_CLASS[row.entry.level]}`}>{SEVERITY_GLYPH[row.entry.level]}</span>
+                    <span className="flex min-w-0 flex-col gap-0.5">
+                      <span className={LEVEL_ROW_CLASS[row.entry.level]}>
+                        {formatted.text}
+                        {row.kind === 'run' && <span className="ml-2 rounded-full border px-1.5 text-[10px] text-muted-foreground">×{row.count}</span>}
+                      </span>
+                      {row.kind === 'run' && (
+                        <span className="text-[11px] text-muted-foreground">
+                          {row.count} times, {melbourneTimeLabel(row.from)} to {melbourneTimeLabel(row.to)} · {expanded ? 'hide' : 'show each one'}
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                  {row.kind === 'one' && openPayload === key && (
+                    <pre className="my-1 overflow-x-auto rounded-md border bg-background p-2 text-[11px] text-muted-foreground">
+                      {JSON.stringify(row.entry, null, 2)}
+                    </pre>
+                  )}
+                  {row.kind === 'run' && expanded && row.items.map((item, itemIndex) => (
+                    <div key={`${key}-${itemIndex}`} className="flex gap-2 px-2 py-0.5 pl-8 text-muted-foreground">
+                      <span className="w-24 shrink-0 tabular-nums">{melbourneTimeLabel(item.timestamp, true)}</span>
+                      <span className="min-w-0">{formatEntry(item).text}</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
           </div>
         </TabsContent>
       </Tabs>
