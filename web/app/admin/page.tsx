@@ -156,6 +156,18 @@ function fileSubLabel(file: LogFileInfo): string {
   return [durationLabel(file), bytesLabel(file.bytes)].filter(Boolean).join(' · ');
 }
 
+// Shared by refreshLogFiles and the mount effect below — the mount effect
+// can't call refreshLogFiles directly (react-hooks/set-state-in-effect sees
+// straight through the useCallback to the setLogFiles call), so both call
+// sites duplicate the setState wrapper, but the fetch/parse/error-shape logic
+// lives here once.
+async function fetchLogFiles(passcode: string): Promise<LogFileInfo[]> {
+  const response = await fetch(`${API_URL}/admin/logs`, { headers: { 'x-admin-passcode': passcode } });
+  if (!response.ok) throw new Error(`status ${response.status}`);
+  const body = (await response.json()) as { files: LogFileInfo[] };
+  return body.files;
+}
+
 export default function AdminPage() {
   const [passcode, setPasscode] = useState('');
   const [enteredPasscode, setEnteredPasscode] = useState('');
@@ -330,10 +342,11 @@ export default function AdminPage() {
   }, [isLive, visibleLogRows, logsPaused]);
 
   const refreshLogFiles = useCallback(async () => {
-    const response = await fetch(`${API_URL}/admin/logs`, { headers: { 'x-admin-passcode': passcode } });
-    if (!response.ok) return;
-    const body = (await response.json()) as { files: LogFileInfo[] };
-    setLogFiles(body.files);
+    try {
+      setLogFiles(await fetchLogFiles(passcode));
+    } catch {
+      toast.error('Could not load the log file list. Check the reverse-proxy config for /admin/logs.');
+    }
   }, [passcode]);
 
   useEffect(() => {
@@ -341,12 +354,14 @@ export default function AdminPage() {
     // Calling the useCallback-memoized refreshLogFiles directly here trips
     // react-hooks/set-state-in-effect (it can see straight through to the
     // setLogFiles call). A fresh, uncaptured async closure sidesteps that
-    // while doing exactly the same fetch.
+    // while doing exactly the same fetch — the fetch/parse logic itself is
+    // shared via fetchLogFiles above.
     void (async () => {
-      const response = await fetch(`${API_URL}/admin/logs`, { headers: { 'x-admin-passcode': passcode } });
-      if (!response.ok) return;
-      const body = (await response.json()) as { files: LogFileInfo[] };
-      setLogFiles(body.files);
+      try {
+        setLogFiles(await fetchLogFiles(passcode));
+      } catch {
+        toast.error('Could not load the log file list. Check the reverse-proxy config for /admin/logs.');
+      }
     })();
   }, [authorized, passcode]);
 

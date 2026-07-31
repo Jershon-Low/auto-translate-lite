@@ -74,6 +74,9 @@ sudo apt install -y caddy
   reverse_proxy /viewer-feedback* localhost:3001
   reverse_proxy /admin/model-config localhost:3001
   reverse_proxy /admin/prompt-config localhost:3001
+  reverse_proxy /admin/translation-flag-display localhost:3001
+  reverse_proxy /admin/openrouter-models localhost:3001
+  reverse_proxy /admin/logs* localhost:3001
   reverse_proxy localhost:3000
 }
 ```
