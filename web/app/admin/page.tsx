@@ -243,6 +243,14 @@ export default function AdminPage() {
   // where a run row's `count` folds several entries into one row.
   const matchedEntryCount = visibleLogRows.reduce((sum, row) => sum + row.count, 0);
 
+  // fileLoading/fileError/fileMeta are only ever written by the historical-file
+  // fetch effect below, which never runs while Live is selected — so gate all
+  // of them on `!isLive` directly rather than relying on that effect to reset
+  // them on the way out. A derived gate can't go stale the way a
+  // reset-on-isLive-change effect could (and one already tripped
+  // react-hooks/set-state-in-effect once in this file).
+  const canShowRows = isLive || (!fileLoading && !fileError);
+
   function visibleLogText(): string {
     return visibleLogRows
       .map((row) => (logViewMode === 'raw'
@@ -346,8 +354,14 @@ export default function AdminPage() {
     if (!authorized || isLive) return;
     let cancelled = false;
     void (async () => {
+      // Reset the previous selection's outcome up front, not just on this
+      // selection's own failure — otherwise file B's banner area can briefly
+      // still carry file A's meta/error between the selection change and this
+      // fetch settling (both are display-gated on `!isLive`, not on which
+      // file they describe).
       setFileLoading(true);
       setFileError(null);
+      setFileMeta(null);
       try {
         const response = await fetch(`${API_URL}/admin/logs/${encodeURIComponent(selectedLog)}`, {
           headers: { 'x-admin-passcode': passcode },
@@ -951,24 +965,24 @@ export default function AdminPage() {
             ref={logScrollRef}
             className="h-[60vh] overflow-auto rounded-md border bg-muted/30 p-2 font-mono text-xs leading-relaxed"
           >
-            {fileLoading && <div className="p-6 text-center text-muted-foreground">Loading…</div>}
-            {fileError && <div className="p-6 text-center text-red-400">{fileError}</div>}
-            {!fileLoading && !fileError && fileMeta && fileMeta.skipped > 0 && (
+            {!isLive && fileLoading && <div className="p-6 text-center text-muted-foreground">Loading…</div>}
+            {!isLive && fileError && <div className="p-6 text-center text-red-400">{fileError}</div>}
+            {!isLive && !fileLoading && !fileError && fileMeta && fileMeta.skipped > 0 && (
               <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">
                 Showing the most recent {(fileMeta.total - fileMeta.skipped).toLocaleString()} of {fileMeta.total.toLocaleString()} entries.
               </div>
             )}
-            {!fileLoading && !fileError && fileMeta && fileMeta.unparseable > 0 && (
+            {!isLive && !fileLoading && !fileError && fileMeta && fileMeta.unparseable > 0 && (
               <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">
                 {fileMeta.unparseable.toLocaleString()} line(s) could not be read and were skipped.
               </div>
             )}
-            {!fileLoading && !fileError && visibleLogRows.length === 0 && (
+            {canShowRows && visibleLogRows.length === 0 && (
               <div className="p-6 text-center text-muted-foreground">
                 Nothing matches those filters. Try turning a severity back on, or clearing the search.
               </div>
             )}
-            {!fileLoading && !fileError && visibleLogRows.map((row, index) => {
+            {canShowRows && visibleLogRows.map((row, index) => {
               const key = `${row.entry.event ?? 'x'}-${row.from}-${index}`;
               if (logViewMode === 'raw') {
                 return (
