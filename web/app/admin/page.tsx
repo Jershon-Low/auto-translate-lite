@@ -110,6 +110,14 @@ function melbourneTimeLabel(iso: string, withSeconds = false): string {
   });
 }
 
+// en-CA conveniently formats as YYYY-MM-DD, matching <input type="date">'s
+// value format, so this can be compared lexicographically against fromDate.
+function melbourneIsoDate(iso: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: MELBOURNE, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(iso));
+}
+
 function fileLabel(file: LogFileInfo): string {
   if (file.kind === 'server') return 'Server (idle events)';
   if (file.kind === 'legacy') return 'Legacy — everything before the split';
@@ -186,7 +194,12 @@ export default function AdminPage() {
   const isLive = selectedLog === 'live';
 
   const visibleLogFiles = useMemo(() => {
-    const filtered = logFiles.filter((file) => !fromDate || (file.startedAt ?? '') >= fromDate);
+    // Bucket by Melbourne calendar day, not the UTC instant in startedAt — a
+    // file with no startedAt is excluded whenever a date filter is active,
+    // explicitly (rather than as an accident of comparing against '').
+    const filtered = logFiles.filter(
+      (file) => !fromDate || (file.startedAt !== null && melbourneIsoDate(file.startedAt) >= fromDate)
+    );
     return [...filtered].sort((a, b) => {
       const left = a.startedAt ? Date.parse(a.startedAt) : 0;
       const right = b.startedAt ? Date.parse(b.startedAt) : 0;
