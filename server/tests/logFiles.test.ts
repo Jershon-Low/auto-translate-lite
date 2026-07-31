@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -284,6 +284,24 @@ describe('initFromDisk', () => {
     const s = store();
     await s.initFromDisk();
     expect(s.currentPath()).toBe('/tmp/pinned.log');
+  });
+
+  it('resolves, leaving state unseeded, when the newest session file cannot be read', async () => {
+    const path = join(dir, 'session-2026-07-26T15-27+1000.log');
+    await writeFile(path, JSON.stringify({ timestamp: new Date().toISOString(), level: 'info' }) + '\n');
+    // Stands in for the EACCES/EMFILE/ENOENT family lastLine() can throw —
+    // realistically ENOENT when an admin deletes the file through the Logs
+    // tab while a restart is racing to seed from it. index.ts awaits
+    // initFromDisk() at the top level; a rejection here must not propagate
+    // and take the whole boot down over a logging concern.
+    await chmod(path, 0o000);
+    try {
+      const s = store();
+      await expect(s.initFromDisk()).resolves.toBeUndefined();
+      expect(s.currentPath()).toBe(join(dir, 'server.log'));
+    } finally {
+      await chmod(path, 0o600);
+    }
   });
 });
 

@@ -225,7 +225,21 @@ export function createLogFileStore(dir: string, legacyPath: string): LogFileStor
       const names = await sessionFileNames(dir);
       const newest = names.at(-1);
       if (!newest) return;
-      const stoppedAt = entryTimestamp(await lastLine(join(dir, newest)));
+      // lastLine() opens and reads the file directly (unlike sessionFileNames'
+      // readdir or entryTimestamp's JSON.parse, neither of which touch the
+      // filesystem this way) and can reject on EACCES, EMFILE, or ENOENT — the
+      // last one realistically when an admin deletes this exact file through
+      // the Logs tab while a restart is in flight. This runs from a bare
+      // top-level await in index.ts; a rejection here would stop the process
+      // before httpServer.listen(), taking the whole service down over a
+      // logging concern. Leave the state unseeded and return, exactly as for
+      // a missing directory or a corrupt tail.
+      let stoppedAt: number | null;
+      try {
+        stoppedAt = entryTimestamp(await lastLine(join(dir, newest)));
+      } catch {
+        return;
+      }
       if (stoppedAt === null) return;
       // Seed the same state a live stop would leave behind; the grace
       // comparison in currentPath() then decides whether to resume.
