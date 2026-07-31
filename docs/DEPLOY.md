@@ -57,6 +57,7 @@ cd ../web && npm install && npm run build
 ## 4. Configure environment variables
 - `server/.env`: `DEEPGRAM_API_KEY`, `GEMINI_API_KEY`, `PORT=3001`, `ADMIN_PASSCODE` (gates `/admin/*` — the admin routes return 401 for everyone, including you, until this is set).
 - `web/.env.production`: `NEXT_PUBLIC_WS_URL=wss://54-123-45-67.sslip.io` (substitute your own instance's hostname — the sslip.io one from Step 1, or your real domain).
+- **Do not set `LOG_FILE_PATH`.** It exists only as a test-isolation escape hatch. If an existing `server/.env` still has it set from before per-session log files were added, remove that line before restarting — with it set, every log write pins to that one file, `data/logs/` is never created, and the admin Logs tab's file picker only ever shows "Live" and "Legacy". The server logs a `log_rotation_disabled` warning on boot whenever it's set, so check `pm2 logs` after a restart if the Logs tab looks empty.
 
 ## 5. Install and configure Caddy as a reverse proxy (automatic HTTPS)
 ```bash

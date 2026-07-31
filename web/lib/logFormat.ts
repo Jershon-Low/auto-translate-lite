@@ -131,6 +131,10 @@ const PHRASING: Record<string, Phrasing> = {
   viewer_feedback_file_load_failed: { simple: false, text: () => 'Could not read saved viewer feedback' },
   viewer_feedback_file_write_failed: { simple: true, text: () => 'Could not save viewer feedback' },
   unknown_gemini_pricing_model: { simple: false, text: (p) => `No price on file for model ${String(p.model ?? '')} — cost not counted` },
+  log_rotation_disabled: {
+    simple: true,
+    text: (p) => `Logs are not being split by session — ${String(p.path ?? 'a fixed file')} is being used for everything`,
+  },
 };
 
 function humanize(name: string): string {
