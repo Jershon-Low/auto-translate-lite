@@ -3,6 +3,7 @@ import { WebSocket } from 'ws';
 import { TranscriptBuffer } from './transcriptBuffer.js';
 import { TranslationCache } from './translationCache.js';
 import { LiveLagTracker } from './liveLag.js';
+import { logFiles } from './logFiles.js';
 import type { RoleCaches } from './sermonCache.js';
 import type { RoleProviders, BacklogProviders } from './llmTypes.js';
 import type { TranslationFlagDisplayMode } from './translationFlagDisplayStore.js';
@@ -61,10 +62,12 @@ export class Session {
     this.isBehind = false;
     this.ingestLagHigh = false;
     this.verifyLagHigh = false;
+    logFiles.openSession();
   }
 
   stop(): void {
     this.isActive = false;
+    logFiles.closeSession();
   }
 
   addViewer(socket: WebSocket, language: string): void {

@@ -271,6 +271,172 @@ describe('wsServer', () => {
     captureSocket.close();
   });
 
+  it('finishes the previous Deepgram connection when a second start arrives', async () => {
+    // Observed twice in production (25 Jul 14:15:20/14:15:32, 26 Jul
+    // 05:01:18/05:05:51): a second 'start' replaced deepgramConnection without
+    // finishing the first, leaking a live Deepgram socket for the rest of the
+    // process.
+    const connections: { send: ReturnType<typeof vi.fn>; finish: ReturnType<typeof vi.fn> }[] = [];
+    deps.createDeepgramConnection = (_apiKey, _callbacks) => {
+      const connection = { send: vi.fn(), finish: vi.fn() };
+      connections.push(connection);
+      return connection;
+    };
+
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket);
+
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+    expect(connections).toHaveLength(1);
+    const first = connections[0];
+
+    // Simulate a client auto-reconnect: it re-sends 'start' on the same
+    // socket without an intervening 'stop'.
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+    expect(connections).toHaveLength(2);
+
+    expect(first.finish).toHaveBeenCalledTimes(1);
+
+    captureSocket.close();
+  });
+
+  it('keeps sending audio to the previous connection while a second start is still awaiting setup', async () => {
+    // Finding 1 (review of the first attempt at this fix): clearing
+    // deepgramConnection/deepgramReady at the top of the 'start' handler —
+    // before four awaited store reads and a Gemini role-cache creation — sent
+    // audio arriving in that window down the pendingAudio branch instead of
+    // to the (still perfectly usable) previous connection, and the
+    // unconditional resetAudioBuffering() just before the replacement
+    // connection is built then silently wiped it. A billing leak was traded
+    // for dropped sermon audio. The fix must keep routing audio to the
+    // previous connection for the whole awaited window and only swap at the
+    // moment the replacement connection is actually created.
+    const connections: Array<{
+      send: ReturnType<typeof vi.fn>;
+      finish: ReturnType<typeof vi.fn>;
+      callbacks: DeepgramCallbacks;
+    }> = [];
+    deps.createDeepgramConnection = (_apiKey, callbacks) => {
+      const connection = { send: vi.fn(), finish: vi.fn() };
+      connections.push({ ...connection, callbacks });
+      return connection;
+    };
+
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket);
+
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+    expect(connections).toHaveLength(1);
+    connections[0].callbacks.onOpen!();
+
+    // Hold the second start's feedbackStore.read() open so there is a real
+    // async window between the second 'start' arriving and the replacement
+    // Deepgram connection actually being created.
+    let releaseRead: (() => void) | undefined;
+    (feedbackStore.read as ReturnType<typeof vi.fn>).mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          releaseRead = () => resolve(CACHE_PADDING);
+        })
+    );
+
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await delay(50); // let the handler reach the pending await
+
+    const chunk = Buffer.from([0xaa, 0xbb]);
+    captureSocket.send(chunk);
+    await delay(50);
+
+    // Still only one connection — the swap hasn't happened yet — and the
+    // audio must have reached it rather than being dropped.
+    expect(connections).toHaveLength(1);
+    expect(connections[0].send).toHaveBeenCalledWith(chunk);
+
+    releaseRead!();
+    await waitForMessage(captureSocket); // status: recording (second start completes)
+    expect(connections).toHaveLength(2);
+
+    captureSocket.close();
+  });
+
+  it('ignores a late close from the previous Deepgram connection after the replacement has already opened', async () => {
+    // Finding 2 (review of the first attempt at this fix): finishing the old
+    // connection and creating a new one in the same handler makes it possible
+    // for the old connection's asynchronous close event to arrive after the
+    // new connection's open. An unguarded onClose would set deepgramReady =
+    // false on a live, working connection, stalling all subsequent audio into
+    // pendingAudio (capped at 5 MB, then dropped) for the rest of the session.
+    const connections: Array<{
+      send: ReturnType<typeof vi.fn>;
+      finish: ReturnType<typeof vi.fn>;
+      callbacks: DeepgramCallbacks;
+    }> = [];
+    deps.createDeepgramConnection = (_apiKey, callbacks) => {
+      const connection = { send: vi.fn(), finish: vi.fn() };
+      connections.push({ ...connection, callbacks });
+      return connection;
+    };
+
+    const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket);
+
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+    expect(connections).toHaveLength(1);
+    const first = connections[0];
+
+    captureSocket.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket); // status: recording
+    expect(connections).toHaveLength(2);
+    const second = connections[1];
+
+    // The new connection opens...
+    second.callbacks.onOpen!();
+
+    // ...then the old connection's close event arrives late.
+    first.callbacks.onClose();
+
+    // The second connection must still be usable: audio routes to it, not
+    // held in pendingAudio.
+    const chunk = Buffer.from([0x01, 0x02]);
+    captureSocket.send(chunk);
+    await delay(50);
+
+    expect(second.send).toHaveBeenCalledWith(chunk);
+    expect(first.send).not.toHaveBeenCalled();
+
+    captureSocket.close();
+  });
+
+  it('does not stop a session that a newer capture socket now owns when a stale socket finally closes', async () => {
+    // Mirrors the Deepgram-connection race above one layer up: a hard WiFi
+    // drop with no RST leaves the old TCP connection alive from the server's
+    // perspective. The browser reconnects and starts a new capture socket —
+    // which immediately claims session.captureSocket on accept — well before
+    // the first socket's connection actually times out and its close handler
+    // fires. That belated close must not stop the session the new socket owns.
+    const captureSocket1 = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket1);
+    captureSocket1.send(JSON.stringify({ type: 'start' }));
+    await waitForMessage(captureSocket1); // status: recording
+    expect(session.isActive).toBe(true);
+
+    const captureSocket2 = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
+    await waitForOpen(captureSocket2);
+
+    // The stale socket's close arrives late, well after the replacement has
+    // taken over captureSocket.
+    captureSocket1.close();
+    await delay(50);
+
+    expect(session.isActive).toBe(true);
+
+    captureSocket2.close();
+  });
+
   it('broadcasts a translated caption to a subscribed viewer', async () => {
     const captureSocket = new WebSocket(`ws://localhost:${port}/ws/capture?passcode=test-passcode`);
     await waitForOpen(captureSocket);

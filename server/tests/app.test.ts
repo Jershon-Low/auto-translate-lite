@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import request from 'supertest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../src/app';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createApp, type AppDeps } from '../src/app';
 import { createSermonDocStore } from '../src/sermonDocStore';
 import { createFeedbackStore } from '../src/feedbackStore';
 import { createViewerFeedbackStore } from '../src/viewerFeedbackStore';
@@ -14,6 +15,7 @@ import {
   DEFAULT_TRANSLATION_FLAG_DISPLAY_CONFIG,
 } from '../src/translationFlagDisplayStore';
 import { createOpenRouterModelsStore } from '../src/openRouterModelsStore';
+import { createLogFileStore, type LogFileStore } from '../src/logFiles';
 
 vi.mock('../src/docExtraction', () => ({
   extractDocumentText: vi.fn().mockResolvedValue('Extracted sermon text'),
@@ -21,7 +23,8 @@ vi.mock('../src/docExtraction', () => ({
 
 import { extractDocumentText } from '../src/docExtraction';
 
-function testDeps() {
+function testDeps(): AppDeps & { logsDir: string } {
+  const logsDir = mkdtempSync(join(tmpdir(), 'app-logs-test-'));
   return {
     sermonDocStore: createSermonDocStore(),
     feedbackStore: createFeedbackStore(join(tmpdir(), `feedback-app-test-${Date.now()}-${Math.random()}.txt`)),
@@ -37,7 +40,29 @@ function testDeps() {
     openRouterModelsStore: createOpenRouterModelsStore(
       join(tmpdir(), `openrouter-models-app-test-${Date.now()}-${Math.random()}.json`)
     ),
+    logFiles: createLogFileStore(logsDir, join(logsDir, 'events.log')),
+    logsDir,
     adminPasscode: 'test-passcode',
+  };
+}
+
+// A store double whose given method rejects, used to prove the admin routes
+// never let a rejected promise escape as an unhandled rejection (Express 4
+// does not forward those to error middleware — the request would just hang).
+function brokenLogFiles(overrides: Partial<LogFileStore>): LogFileStore {
+  return {
+    currentPath: () => '',
+    openSession: () => {},
+    closeSession: () => {},
+    activeName: () => null,
+    reset: () => {},
+    initFromDisk: async () => {},
+    list: async () => [],
+    read: async () => {
+      throw new Error('not implemented in this double');
+    },
+    remove: async () => {},
+    ...overrides,
   };
 }
 
@@ -475,5 +500,143 @@ describe('GET/POST /admin/openrouter-models', () => {
       .set('x-admin-passcode', 'test-passcode')
       .send({ model: '' });
     expect(response.status).toBe(400);
+  });
+});
+
+function logLine(timestamp: string, event: string): string {
+  return JSON.stringify({ timestamp, level: 'info', event }) + '\n';
+}
+
+describe('GET /admin/logs', () => {
+  it('requires the admin passcode', async () => {
+    const response = await request(createApp(testDeps())).get('/admin/logs');
+    expect(response.status).toBe(401);
+  });
+
+  it('lists the files in the log directory', async () => {
+    const deps = testDeps();
+    writeFileSync(join(deps.logsDir, 'session-2026-07-26T15-27+1000.log'), logLine('2026-07-26T05:27:05.418Z', 'dg_diag_open'));
+    const response = await request(createApp(deps)).get('/admin/logs').set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(200);
+    expect(response.body.files).toHaveLength(1);
+    expect(response.body.files[0]).toMatchObject({
+      name: 'session-2026-07-26T15-27+1000.log',
+      kind: 'session',
+      startedAt: '2026-07-26T05:27:05.418Z',
+      active: false,
+    });
+  });
+
+  it('returns 500 instead of hanging when the store throws unexpectedly', async () => {
+    const deps = testDeps();
+    deps.logFiles = brokenLogFiles({
+      list: async () => {
+        throw new Error('disk on fire');
+      },
+    });
+    const response = await request(createApp(deps)).get('/admin/logs').set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(500);
+  });
+});
+
+describe('GET /admin/logs/:name', () => {
+  it('requires the admin passcode', async () => {
+    const response = await request(createApp(testDeps())).get('/admin/logs/server.log');
+    expect(response.status).toBe(401);
+  });
+
+  it('returns the parsed entries with counts', async () => {
+    const deps = testDeps();
+    writeFileSync(join(deps.logsDir, 'server.log'), logLine('2026-07-27T01:00:00.000Z', 'cost_file_load_failed'));
+    const response = await request(createApp(deps)).get('/admin/logs/server.log').set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ total: 1, skipped: 0, unparseable: 0 });
+    expect(response.body.entries[0].event).toBe('cost_file_load_failed');
+  });
+
+  it('returns 404 for a name that fails validation', async () => {
+    const response = await request(createApp(testDeps()))
+      .get('/admin/logs/' + encodeURIComponent('../../etc/passwd'))
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(404);
+  });
+
+  it('returns 404 for a well-formed name that does not exist', async () => {
+    const response = await request(createApp(testDeps()))
+      .get('/admin/logs/session-2026-07-26T15-27+1000.log')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(404);
+  });
+
+  it('returns 500 instead of hanging when the store throws unexpectedly', async () => {
+    const deps = testDeps();
+    deps.logFiles = brokenLogFiles({
+      read: async () => {
+        throw new Error('disk on fire');
+      },
+    });
+    const response = await request(createApp(deps)).get('/admin/logs/server.log').set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(500);
+  });
+});
+
+describe('DELETE /admin/logs/:name', () => {
+  it('requires the admin passcode', async () => {
+    const response = await request(createApp(testDeps())).delete('/admin/logs/server.log');
+    expect(response.status).toBe(401);
+  });
+
+  it('deletes a past session file', async () => {
+    const deps = testDeps();
+    writeFileSync(join(deps.logsDir, 'session-2026-07-26T15-27+1000.log'), logLine('2026-07-26T05:27:05.418Z', 'dg_diag_open'));
+    const app = createApp(deps);
+    const response = await request(app).delete('/admin/logs/session-2026-07-26T15-27+1000.log').set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(204);
+    const list = await request(app).get('/admin/logs').set('x-admin-passcode', 'test-passcode');
+    expect(list.body.files).toEqual([]);
+  });
+
+  it('returns 409 when the file is the running session', async () => {
+    const deps = testDeps();
+    deps.logFiles.openSession(Date.parse('2026-07-26T05:27:05.418Z'));
+    writeFileSync(join(deps.logsDir, 'session-2026-07-26T15-27+1000.log'), logLine('2026-07-26T05:27:05.418Z', 'dg_diag_open'));
+    const response = await request(createApp(deps))
+      .delete('/admin/logs/session-2026-07-26T15-27+1000.log')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(409);
+  });
+
+  it('returns 403 for the legacy file', async () => {
+    const deps = testDeps();
+    writeFileSync(join(deps.logsDir, 'events.log'), logLine('2026-07-18T00:00:00.000Z', 'dg_diag_open'));
+    const response = await request(createApp(deps)).delete('/admin/logs/events.log').set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(403);
+  });
+
+  it('returns 404 for a name that fails validation', async () => {
+    const response = await request(createApp(testDeps()))
+      .delete('/admin/logs/' + encodeURIComponent('../../etc/passwd'))
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(404);
+  });
+
+  it('returns 404 for a well-formed name that does not exist', async () => {
+    const response = await request(createApp(testDeps()))
+      .delete('/admin/logs/session-2026-07-26T15-27+1000.log')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(404);
+  });
+
+  it('returns 500 instead of hanging when the store throws unexpectedly', async () => {
+    const deps = testDeps();
+    deps.logFiles = brokenLogFiles({
+      remove: async () => {
+        throw new Error('disk on fire');
+      },
+    });
+    const response = await request(createApp(deps))
+      .delete('/admin/logs/server.log')
+      .set('x-admin-passcode', 'test-passcode');
+    expect(response.status).toBe(500);
   });
 });

@@ -4,6 +4,8 @@ import { createApp } from './app.js';
 import { attachWsServer } from './wsServer.js';
 import { Session } from './session.js';
 import { logHub } from './logHub.js';
+import { logFiles } from './logFiles.js';
+import { logEvent } from './logger.js';
 import { createGeminiClient } from './gemini.js';
 import { createDeepgramConnection } from './deepgram.js';
 import { createSermonDocStore } from './sermonDocStore.js';
@@ -103,6 +105,7 @@ const app = createApp({
   promptConfigStore,
   openRouterModelsStore,
   translationFlagDisplayStore,
+  logFiles,
   adminPasscode: process.env.ADMIN_PASSCODE,
 });
 const httpServer = createServer(app);
@@ -137,6 +140,24 @@ attachWsServer({
   maxPublishLagMs: process.env.MAX_PUBLISH_LAG_MS ? Number(process.env.MAX_PUBLISH_LAG_MS) : 8000,
   maxCorrectionLagMs: process.env.MAX_CORRECTION_LAG_MS ? Number(process.env.MAX_CORRECTION_LAG_MS) : 30000,
 });
+
+// Seed the store from disk so a restart mid-service resumes the same file
+// instead of splitting the session across two logs.
+await logFiles.initFromDisk();
+
+// LOG_FILE_PATH is a test-isolation escape hatch that also works (and is
+// sometimes left set) in production — when it's set, every write pins to
+// that one file and per-session log files never happen. Silent, since
+// pinnedPath() short-circuits before any of the per-session logic runs. Make
+// it loud instead of leaving an operator to notice only when the picker
+// shows nothing but Live and Legacy.
+if (process.env.LOG_FILE_PATH) {
+  void logEvent('warn', {
+    event: 'log_rotation_disabled',
+    reason: 'LOG_FILE_PATH is set; per-session log files are disabled',
+    path: process.env.LOG_FILE_PATH,
+  });
+}
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;
 httpServer.listen(port, () => {

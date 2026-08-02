@@ -65,4 +65,21 @@ describe('logEvent', () => {
     expect(last).toMatchObject({ level: 'warn', event: 'unit_test_event', detail: 42 });
     expect(typeof last?.timestamp).toBe('string');
   });
+
+  it('appends to the path the log-file store reports as current', async () => {
+    vi.resetModules();
+    tempDir = await mkdtemp(join(tmpdir(), 'logger-test-'));
+    const target = join(tempDir, 'session-from-store.log');
+    vi.doMock('../src/logFiles', () => ({
+      logFiles: { currentPath: () => target },
+    }));
+    const { logEvent: freshLogEvent } = await import('../src/logger');
+
+    await freshLogEvent('info', { event: 'routed_through_store' });
+
+    const content = await readFile(target, 'utf-8');
+    expect(JSON.parse(content.trim()).event).toBe('routed_through_store');
+    vi.doUnmock('../src/logFiles');
+    vi.resetModules();
+  });
 });

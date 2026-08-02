@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,9 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Textarea } from '@/components/ui/textarea';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { formatEntry, collapseRuns, type LogEntry as FormatLogEntry, type LogRow } from '@/lib/logFormat';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001';
 const API_URL = WS_URL.replace(/^ws/, 'http');
@@ -77,10 +80,92 @@ const LEVEL_ROW_CLASS: Record<LogEntry['level'], string> = {
   error: 'text-red-600 dark:text-red-400',
 };
 
-function formatEntry(entry: LogEntry): string {
+// Severity as a border stripe as well as text colour: amber text alone
+// disappears the moment a row wraps.
+const SEVERITY_BORDER: Record<LogEntry['level'], string> = {
+  info: 'border-transparent',
+  warn: 'border-amber-400',
+  error: 'border-red-400',
+};
+const SEVERITY_GLYPH: Record<LogEntry['level'], string> = { info: '●', warn: '⚠', error: '✕' };
+
+type LogViewMode = 'simple' | 'detailed' | 'raw';
+
+function formatRawEntry(entry: LogEntry): string {
   const { timestamp, level, event, ...rest } = entry;
   const restText = Object.keys(rest).length > 0 ? ' ' + JSON.stringify(rest) : '';
   return `${timestamp} [${level}] ${event ?? ''}${restText}`.trimEnd();
+}
+
+interface LogFileInfo {
+  name: string;
+  kind: 'session' | 'server' | 'legacy';
+  startedAt: string | null;
+  endedAt: string | null;
+  bytes: number;
+  active: boolean;
+}
+
+const MELBOURNE = 'Australia/Melbourne';
+
+function melbourneDateLabel(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-AU', {
+    timeZone: MELBOURNE, weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+  });
+}
+
+function melbourneTimeLabel(iso: string, withSeconds = false): string {
+  return new Date(iso).toLocaleTimeString('en-AU', {
+    timeZone: MELBOURNE, hour: 'numeric', minute: '2-digit',
+    ...(withSeconds ? { second: '2-digit' } : {}),
+  });
+}
+
+// en-CA conveniently formats as YYYY-MM-DD, matching <input type="date">'s
+// value format, so this can be compared lexicographically against fromDate.
+function melbourneIsoDate(iso: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: MELBOURNE, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(iso));
+}
+
+function fileLabel(file: LogFileInfo): string {
+  if (file.kind === 'server') return 'Server (idle events)';
+  if (file.kind === 'legacy') return 'Legacy — everything before the split';
+  if (!file.startedAt) return file.name;
+  const start = melbourneDateLabel(file.startedAt) + ', ' + melbourneTimeLabel(file.startedAt);
+  return file.endedAt ? `${start} – ${melbourneTimeLabel(file.endedAt)}` : start;
+}
+
+function durationLabel(file: LogFileInfo): string {
+  if (!file.startedAt || !file.endedAt) return '';
+  const ms = Date.parse(file.endedAt) - Date.parse(file.startedAt);
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  const hours = Math.floor(ms / 3_600_000);
+  const minutes = Math.round((ms % 3_600_000) / 60_000);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function bytesLabel(bytes: number): string {
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  if (bytes >= 1_000) return `${Math.round(bytes / 1_000)} KB`;
+  return `${bytes} B`;
+}
+
+function fileSubLabel(file: LogFileInfo): string {
+  return [durationLabel(file), bytesLabel(file.bytes)].filter(Boolean).join(' · ');
+}
+
+// Shared by refreshLogFiles and the mount effect below — the mount effect
+// can't call refreshLogFiles directly (react-hooks/set-state-in-effect sees
+// straight through the useCallback to the setLogFiles call), so both call
+// sites duplicate the setState wrapper, but the fetch/parse/error-shape logic
+// lives here once.
+async function fetchLogFiles(passcode: string): Promise<LogFileInfo[]> {
+  const response = await fetch(`${API_URL}/admin/logs`, { headers: { 'x-admin-passcode': passcode } });
+  if (!response.ok) throw new Error(`status ${response.status}`);
+  const body = (await response.json()) as { files: LogFileInfo[] };
+  return body.files;
 }
 
 export default function AdminPage() {
@@ -117,16 +202,74 @@ export default function AdminPage() {
   });
   const [logSearch, setLogSearch] = useState('');
   const [logsPaused, setLogsPaused] = useState(false);
+  const [logViewMode, setLogViewMode] = useState<LogViewMode>('simple');
+  const [expandedRuns, setExpandedRuns] = useState<Record<string, boolean>>({});
+  const [openPayload, setOpenPayload] = useState<string | null>(null);
 
-  const visibleLogEntries = logEntries.filter((entry) => {
-    if (!levelFilter[entry.level]) return false;
-    const query = logSearch.trim().toLowerCase();
-    if (query.length > 0) {
-      const haystack = `${entry.event ?? ''} ${JSON.stringify(entry)}`.toLowerCase();
-      if (!haystack.includes(query)) return false;
+  const [logFiles, setLogFiles] = useState<LogFileInfo[]>([]);
+  const [selectedLog, setSelectedLog] = useState<string>('live');
+  const [fileEntries, setFileEntries] = useState<FormatLogEntry[]>([]);
+  const [fileMeta, setFileMeta] = useState<{ total: number; skipped: number; unparseable: number } | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [fileLoading, setFileLoading] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [sortNewestFirst, setSortNewestFirst] = useState(true);
+  const [fromDate, setFromDate] = useState('');
+  const [pendingDelete, setPendingDelete] = useState<LogFileInfo | null>(null);
+
+  const isLive = selectedLog === 'live';
+
+  const visibleLogFiles = useMemo(() => {
+    // Bucket by Melbourne calendar day, not the UTC instant in startedAt — a
+    // file with no startedAt is excluded whenever a date filter is active,
+    // explicitly (rather than as an accident of comparing against '').
+    const filtered = logFiles.filter(
+      (file) => !fromDate || (file.startedAt !== null && melbourneIsoDate(file.startedAt) >= fromDate)
+    );
+    return [...filtered].sort((a, b) => {
+      const left = a.startedAt ? Date.parse(a.startedAt) : 0;
+      const right = b.startedAt ? Date.parse(b.startedAt) : 0;
+      return sortNewestFirst ? right - left : left - right;
+    });
+  }, [logFiles, fromDate, sortNewestFirst]);
+
+  // Live streams from the WS buffer; a historical selection reads the file
+  // loaded by the effect below. Both share the same LogEntry shape.
+  const sourceEntries: LogEntry[] = isLive ? logEntries : fileEntries;
+
+  const visibleLogRows = useMemo<LogRow[]>(() => {
+    const search = logSearch.trim().toLowerCase();
+    const kept = sourceEntries.filter((entry) => {
+      if (!levelFilter[entry.level]) return false;
+      if (logViewMode === 'simple' && !formatEntry(entry).simple) return false;
+      if (!search) return true;
+      return `${entry.event ?? ''} ${formatEntry(entry).text} ${JSON.stringify(entry)}`.toLowerCase().includes(search);
+    });
+    if (logViewMode !== 'simple') {
+      return kept.map((entry) => ({ kind: 'one' as const, entry, count: 1, from: entry.timestamp, to: entry.timestamp, items: [entry] }));
     }
-    return true;
-  });
+    return collapseRuns(kept);
+  }, [sourceEntries, levelFilter, logSearch, logViewMode]);
+
+  // Sum of row counts equals the filtered-entry count even in Simple mode,
+  // where a run row's `count` folds several entries into one row.
+  const matchedEntryCount = visibleLogRows.reduce((sum, row) => sum + row.count, 0);
+
+  // fileLoading/fileError/fileMeta are only ever written by the historical-file
+  // fetch effect below, which never runs while Live is selected — so gate all
+  // of them on `!isLive` directly rather than relying on that effect to reset
+  // them on the way out. A derived gate can't go stale the way a
+  // reset-on-isLive-change effect could (and one already tripped
+  // react-hooks/set-state-in-effect once in this file).
+  const canShowRows = isLive || (!fileLoading && !fileError);
+
+  function visibleLogText(): string {
+    return visibleLogRows
+      .map((row) => (logViewMode === 'raw'
+        ? formatRawEntry(row.entry)
+        : `${melbourneTimeLabel(row.entry.timestamp, true)}  ${formatEntry(row.entry).text}${row.kind === 'run' ? ` (×${row.count})` : ''}`))
+      .join('\n');
+  }
 
   useEffect(() => {
     const stored = window.sessionStorage.getItem('adminPasscode');
@@ -191,10 +334,84 @@ export default function AdminPage() {
   }, [authorized, passcode]);
 
   useEffect(() => {
-    if (logsPaused) return;
+    // Auto-follow-to-bottom is a live-tail concept; a historical file is
+    // being browsed, not tailed, so leave the scroll position alone.
+    if (!isLive || logsPaused) return;
     const el = logScrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [visibleLogEntries, logsPaused]);
+  }, [isLive, visibleLogRows, logsPaused]);
+
+  const refreshLogFiles = useCallback(async () => {
+    try {
+      setLogFiles(await fetchLogFiles(passcode));
+    } catch {
+      toast.error('Could not load the log file list. Check the reverse-proxy config for /admin/logs.');
+    }
+  }, [passcode]);
+
+  useEffect(() => {
+    if (!authorized) return;
+    // Calling the useCallback-memoized refreshLogFiles directly here trips
+    // react-hooks/set-state-in-effect (it can see straight through to the
+    // setLogFiles call). A fresh, uncaptured async closure sidesteps that
+    // while doing exactly the same fetch — the fetch/parse logic itself is
+    // shared via fetchLogFiles above.
+    void (async () => {
+      try {
+        setLogFiles(await fetchLogFiles(passcode));
+      } catch {
+        toast.error('Could not load the log file list. Check the reverse-proxy config for /admin/logs.');
+      }
+    })();
+  }, [authorized, passcode]);
+
+  useEffect(() => {
+    if (!authorized || isLive) return;
+    let cancelled = false;
+    void (async () => {
+      // Reset the previous selection's outcome up front, not just on this
+      // selection's own failure — otherwise file B's banner area can briefly
+      // still carry file A's meta/error between the selection change and this
+      // fetch settling (both are display-gated on `!isLive`, not on which
+      // file they describe).
+      setFileLoading(true);
+      setFileError(null);
+      setFileMeta(null);
+      try {
+        const response = await fetch(`${API_URL}/admin/logs/${encodeURIComponent(selectedLog)}`, {
+          headers: { 'x-admin-passcode': passcode },
+        });
+        if (!response.ok) throw new Error(response.status === 404 ? 'That log is no longer on the server.' : 'Could not load that log.');
+        const body = (await response.json()) as { entries: FormatLogEntry[]; total: number; skipped: number; unparseable: number };
+        if (cancelled) return;
+        setFileEntries(body.entries);
+        setFileMeta({ total: body.total, skipped: body.skipped, unparseable: body.unparseable });
+      } catch (error) {
+        if (cancelled) return;
+        setFileEntries([]);
+        setFileMeta(null);
+        setFileError(error instanceof Error ? error.message : 'Could not load that log.');
+      } finally {
+        if (!cancelled) setFileLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authorized, isLive, selectedLog, passcode]);
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    const response = await fetch(`${API_URL}/admin/logs/${encodeURIComponent(pendingDelete.name)}`, {
+      method: 'DELETE',
+      headers: { 'x-admin-passcode': passcode },
+    });
+    if (response.status === 409) { toast.error('That session is still running.'); setPendingDelete(null); return; }
+    if (response.status === 403) { toast.error('That log cannot be deleted.'); setPendingDelete(null); return; }
+    if (!response.ok) { toast.error('Could not delete that log.'); setPendingDelete(null); return; }
+    toast.success(`Deleted ${pendingDelete.name}`);
+    if (selectedLog === pendingDelete.name) setSelectedLog('live');
+    setPendingDelete(null);
+    await refreshLogFiles();
+  }
 
   async function loadAll(candidatePasscode: string) {
     setCheckingAuth(true);
@@ -330,18 +547,43 @@ export default function AdminPage() {
   }
 
   function copyLogs() {
-    void navigator.clipboard.writeText(visibleLogEntries.map(formatEntry).join('\n'));
+    void navigator.clipboard.writeText(visibleLogText());
     toast.success('Logs copied.');
   }
 
   function downloadLogs() {
-    const blob = new Blob([visibleLogEntries.map(formatEntry).join('\n')], { type: 'text/plain' });
+    const blob = new Blob([visibleLogText()], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
     anchor.download = `logs-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
     anchor.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function downloadRawLogFile() {
+    if (isLive) return;
+    try {
+      const response = await fetch(`${API_URL}/admin/logs/${encodeURIComponent(selectedLog)}`, {
+        headers: { 'x-admin-passcode': passcode },
+      });
+      if (!response.ok) {
+        toast.error('Could not download that log.');
+        return;
+      }
+      // The untouched response body, not the parsed-and-reformatted entries
+      // used on screen — this is the diagnostic escape hatch.
+      const raw = await response.text();
+      const blob = new Blob([raw], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${selectedLog.replace(/\.[^.]+$/, '')}-raw.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error('Could not download that log.');
+    }
   }
 
   function clearLogs() {
@@ -588,7 +830,102 @@ export default function AdminPage() {
         </TabsContent>
 
         <TabsContent value="logs" className="flex flex-col gap-3">
+          {pendingDelete && (
+            <Alert variant="destructive">
+              <AlertDescription>
+                Delete {fileLabel(pendingDelete)}? This cannot be undone.
+              </AlertDescription>
+              <div className="mt-2 flex gap-2">
+                <Button size="sm" variant="destructive" onClick={() => void confirmDelete()}>
+                  Delete log
+                </Button>
+                <Button size="sm" variant="secondary" onClick={() => setPendingDelete(null)}>
+                  Keep it
+                </Button>
+              </div>
+            </Alert>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
+            <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+              <PopoverTrigger
+                render={
+                  <Button variant="secondary" size="sm" className="min-w-64 justify-start">
+                    {isLive
+                      ? 'Live — current session'
+                      : fileLabel(
+                          logFiles.find((f) => f.name === selectedLog) ?? {
+                            name: selectedLog,
+                            kind: 'session',
+                            startedAt: null,
+                            endedAt: null,
+                            bytes: 0,
+                            active: false,
+                          }
+                        )}
+                  </Button>
+                }
+              />
+              <PopoverContent className="w-96 p-1">
+                <div className="flex items-center gap-2 border-b p-2">
+                  <Input
+                    type="date"
+                    value={fromDate}
+                    onChange={(event) => setFromDate(event.target.value)}
+                    aria-label="Show logs from this date onward"
+                    className="h-8 flex-1"
+                  />
+                  <ToggleGroup
+                    value={[sortNewestFirst ? 'new' : 'old']}
+                    onValueChange={(values) => setSortNewestFirst(values[0] !== 'old')}
+                  >
+                    <ToggleGroupItem value="new" size="sm">Newest</ToggleGroupItem>
+                    <ToggleGroupItem value="old" size="sm">Oldest</ToggleGroupItem>
+                  </ToggleGroup>
+                </div>
+                <ScrollArea className="max-h-72">
+                  <button
+                    type="button"
+                    onClick={() => { setSelectedLog('live'); setPickerOpen(false); }}
+                    className="flex w-full flex-col items-start rounded-sm px-2 py-2 text-left hover:bg-muted"
+                  >
+                    <span className="text-sm">Live — current session</span>
+                    <span className="text-xs text-muted-foreground">Streaming from the server</span>
+                  </button>
+                  {visibleLogFiles.map((file) => (
+                    <button
+                      key={file.name}
+                      type="button"
+                      onClick={() => { setSelectedLog(file.name); setPickerOpen(false); }}
+                      className="flex w-full flex-col items-start rounded-sm px-2 py-2 text-left hover:bg-muted"
+                    >
+                      <span className="text-sm">{fileLabel(file)}</span>
+                      <span className="text-xs text-muted-foreground">{fileSubLabel(file)}</span>
+                    </button>
+                  ))}
+                </ScrollArea>
+              </PopoverContent>
+            </Popover>
+
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={isLive || selectedLog === 'events.log'}
+              onClick={() => setPendingDelete(logFiles.find((f) => f.name === selectedLog) ?? null)}
+            >
+              Delete
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <ToggleGroup
+              value={[logViewMode]}
+              onValueChange={(values) => setLogViewMode(((values as string[])[0] ?? 'simple') as LogViewMode)}
+            >
+              <ToggleGroupItem value="simple" size="sm">Simple</ToggleGroupItem>
+              <ToggleGroupItem value="detailed" size="sm">Detailed</ToggleGroupItem>
+              <ToggleGroupItem value="raw" size="sm">Raw</ToggleGroupItem>
+            </ToggleGroup>
             <ToggleGroup
               multiple
               value={(Object.keys(levelFilter) as LogEntry['level'][]).filter((level) => levelFilter[level])}
@@ -597,9 +934,9 @@ export default function AdminPage() {
                 setLevelFilter({ info: active.has('info'), warn: active.has('warn'), error: active.has('error') });
               }}
             >
-              <ToggleGroupItem value="info" size="sm">Info</ToggleGroupItem>
-              <ToggleGroupItem value="warn" size="sm">Warn</ToggleGroupItem>
-              <ToggleGroupItem value="error" size="sm">Error</ToggleGroupItem>
+              <ToggleGroupItem value="info" size="sm">Normal</ToggleGroupItem>
+              <ToggleGroupItem value="warn" size="sm">Attention</ToggleGroupItem>
+              <ToggleGroupItem value="error" size="sm">Problems</ToggleGroupItem>
             </ToggleGroup>
             <Input
               value={logSearch}
@@ -607,28 +944,109 @@ export default function AdminPage() {
               placeholder="Filter…"
               className="h-8 w-40"
             />
-            <Button variant="secondary" size="sm" onClick={() => setLogsPaused((paused) => !paused)}>
+            <Button variant="secondary" size="sm" disabled={!isLive} onClick={() => setLogsPaused((paused) => !paused)}>
               {logsPaused ? 'Resume' : 'Pause'}
             </Button>
             <Button variant="secondary" size="sm" onClick={clearLogs}>Clear</Button>
             <Button variant="secondary" size="sm" onClick={copyLogs}>Copy</Button>
             <Button variant="secondary" size="sm" onClick={downloadLogs}>Download</Button>
+            {!isLive && (
+              <Button variant="secondary" size="sm" onClick={() => void downloadRawLogFile()}>
+                Download raw file
+              </Button>
+            )}
           </div>
           <div className="text-xs text-muted-foreground">
-            {logStatus === 'connected' ? 'Live' : logStatus === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}
-            {logsPaused ? ' · Paused' : ''}
-            {' · '}
-            {visibleLogEntries.length} / {logEntries.length} entries
+            {isLive ? (
+              <>
+                {logStatus === 'connected' ? 'Live' : logStatus === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}
+                {logsPaused ? ' · Paused' : ''}
+                {' · '}
+                {matchedEntryCount} / {sourceEntries.length} entries
+              </>
+            ) : fileLoading ? (
+              'Loading…'
+            ) : fileError ? (
+              <span className="text-destructive">{fileError}</span>
+            ) : fileMeta ? (
+              <>
+                {matchedEntryCount} / {sourceEntries.length} entries loaded
+                {fileMeta.skipped > 0 ? ` (of ${fileMeta.total} in the file)` : ''}
+                {fileMeta.unparseable > 0 ? ` · ${fileMeta.unparseable} unparseable` : ''}
+              </>
+            ) : null}
           </div>
           <div
             ref={logScrollRef}
             className="h-[60vh] overflow-auto rounded-md border bg-muted/30 p-2 font-mono text-xs leading-relaxed"
           >
-            {visibleLogEntries.map((entry, index) => (
-              <div key={index} className={`whitespace-pre-wrap break-all ${LEVEL_ROW_CLASS[entry.level] ?? LEVEL_ROW_CLASS.info}`}>
-                {formatEntry(entry)}
+            {!isLive && fileLoading && <div className="p-6 text-center text-muted-foreground">Loading…</div>}
+            {!isLive && fileError && <div className="p-6 text-center text-red-400">{fileError}</div>}
+            {!isLive && !fileLoading && !fileError && fileMeta && fileMeta.skipped > 0 && (
+              <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">
+                Showing the most recent {(fileMeta.total - fileMeta.skipped).toLocaleString()} of {fileMeta.total.toLocaleString()} entries.
               </div>
-            ))}
+            )}
+            {!isLive && !fileLoading && !fileError && fileMeta && fileMeta.unparseable > 0 && (
+              <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">
+                {fileMeta.unparseable.toLocaleString()} line(s) could not be read and were skipped.
+              </div>
+            )}
+            {canShowRows && visibleLogRows.length === 0 && (
+              <div className="p-6 text-center text-muted-foreground">
+                Nothing matches those filters. Try turning a severity back on, or clearing the search.
+              </div>
+            )}
+            {canShowRows && visibleLogRows.map((row, index) => {
+              const key = `${row.entry.event ?? 'x'}-${row.from}-${index}`;
+              if (logViewMode === 'raw') {
+                return (
+                  <div key={key} className={`whitespace-pre-wrap break-all ${LEVEL_ROW_CLASS[row.entry.level] ?? LEVEL_ROW_CLASS.info}`}>
+                    {formatRawEntry(row.entry)}
+                  </div>
+                );
+              }
+              const formatted = formatEntry(row.entry);
+              const expanded = expandedRuns[key] ?? false;
+              return (
+                <div key={key}>
+                  <button
+                    type="button"
+                    onClick={() => (row.kind === 'run'
+                      ? setExpandedRuns((current) => ({ ...current, [key]: !expanded }))
+                      : setOpenPayload((current) => (current === key ? null : key)))}
+                    className={`flex w-full gap-2 border-l-2 px-2 py-1 text-left hover:bg-muted/40 ${SEVERITY_BORDER[row.entry.level]}`}
+                  >
+                    <span className="w-24 shrink-0 tabular-nums text-muted-foreground">
+                      {melbourneTimeLabel(row.entry.timestamp, true)}
+                    </span>
+                    <span className={`w-4 shrink-0 ${LEVEL_ROW_CLASS[row.entry.level]}`}>{SEVERITY_GLYPH[row.entry.level]}</span>
+                    <span className="flex min-w-0 flex-col gap-0.5">
+                      <span className={LEVEL_ROW_CLASS[row.entry.level]}>
+                        {formatted.text}
+                        {row.kind === 'run' && <span className="ml-2 rounded-full border px-1.5 text-[10px] text-muted-foreground">×{row.count}</span>}
+                      </span>
+                      {row.kind === 'run' && (
+                        <span className="text-[11px] text-muted-foreground">
+                          {row.count} times, {melbourneTimeLabel(row.from)} to {melbourneTimeLabel(row.to)} · {expanded ? 'hide' : 'show each one'}
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                  {row.kind === 'one' && openPayload === key && (
+                    <pre className="my-1 overflow-x-auto rounded-md border bg-background p-2 text-[11px] text-muted-foreground">
+                      {JSON.stringify(row.entry, null, 2)}
+                    </pre>
+                  )}
+                  {row.kind === 'run' && expanded && row.items.map((item, itemIndex) => (
+                    <div key={`${key}-${itemIndex}`} className="flex gap-2 px-2 py-0.5 pl-8 text-muted-foreground">
+                      <span className="w-24 shrink-0 tabular-nums">{melbourneTimeLabel(item.timestamp, true)}</span>
+                      <span className="min-w-0">{formatEntry(item).text}</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
           </div>
         </TabsContent>
       </Tabs>

@@ -22,6 +22,12 @@ import {
   TRANSLATION_VERIFIER_FIXED_RULES_INTRO,
   TRANSLATION_VERIFIER_FIXED_RULES_OUTRO,
 } from './llmPrompts.js';
+import {
+  LogFileActiveError,
+  LogFileNameError,
+  LogFileProtectedError,
+  type LogFileStore,
+} from './logFiles.js';
 
 export interface AppDeps {
   sermonDocStore: SermonDocStore;
@@ -32,7 +38,17 @@ export interface AppDeps {
   promptConfigStore: PromptConfigStore;
   openRouterModelsStore: OpenRouterModelsStore;
   translationFlagDisplayStore: TranslationFlagDisplayStore;
+  logFiles: LogFileStore;
   adminPasscode: string | undefined;
+}
+
+// An error that made it this far is neither a validated "no such log"
+// (LogFileNameError/ENOENT) nor one of the deletion-guard errors — it's
+// something unexpected from the filesystem. Express 4 does not forward a
+// rejected async-handler promise to error middleware, so leaving this
+// uncaught would hang the request instead of failing it.
+function isMissingLogError(error: unknown): boolean {
+  return error instanceof LogFileNameError || (error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT');
 }
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -193,6 +209,49 @@ export function createApp(deps: AppDeps): Express {
     }
     await deps.translationFlagDisplayStore.write(config);
     res.json({ ok: true });
+  });
+
+  app.get('/admin/logs', adminAuth, async (_req, res) => {
+    try {
+      res.json({ files: await deps.logFiles.list() });
+    } catch {
+      res.status(500).json({ error: 'Failed to list the logs.' });
+    }
+  });
+
+  app.get('/admin/logs/:name', adminAuth, async (req, res) => {
+    try {
+      res.json(await deps.logFiles.read(req.params.name));
+    } catch (error) {
+      // An unknown name and an absent file are the same answer to a client:
+      // there is no such log.
+      if (isMissingLogError(error)) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+      res.status(500).json({ error: 'Failed to read the log.' });
+    }
+  });
+
+  app.delete('/admin/logs/:name', adminAuth, async (req, res) => {
+    try {
+      await deps.logFiles.remove(req.params.name);
+      res.status(204).end();
+    } catch (error) {
+      if (error instanceof LogFileProtectedError) {
+        res.status(403).json({ error: 'This log cannot be deleted.' });
+        return;
+      }
+      if (error instanceof LogFileActiveError) {
+        res.status(409).json({ error: 'That session is still running.' });
+        return;
+      }
+      if (isMissingLogError(error)) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+      res.status(500).json({ error: 'Failed to delete the log.' });
+    }
   });
 
   return app;

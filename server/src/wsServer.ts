@@ -452,9 +452,25 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
 
             audioChunkCount = 0;
             audioByteCount = 0;
+            // A second 'start' on the same socket (client reconnect) must not
+            // orphan the previous Deepgram connection — it stays open and
+            // billing otherwise, with no reference left to close it. Finish it
+            // right here at the swap, not earlier: audio keeps flowing to it
+            // through the awaits above (store reads + role-cache creation) via
+            // the still-current deepgramConnection/deepgramReady, so nothing is
+            // dropped into pendingAudio prematurely.
+            deepgramConnection?.finish();
             resetAudioBuffering();
-            deepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
+            // The old connection's finish() above triggers its close
+            // asynchronously; if that close event lands after this new
+            // connection has already opened, its onClose must not clobber this
+            // connection's deepgramReady. Capture this connection in a local so
+            // its own callbacks can tell — via the shared deepgramConnection
+            // variable — whether they still belong to the current connection.
+            let newDeepgramConnection: DeepgramConnection | null = null;
+            newDeepgramConnection = deps.createDeepgramConnection(deps.deepgramApiKey, {
               onOpen: () => {
+                if (deepgramConnection !== newDeepgramConnection) return;
                 deepgramReady = true;
                 flushPendingAudio();
               },
@@ -480,11 +496,13 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
                 deps.session.broadcastToReview(errorPayload);
               },
               onClose: () => {
+                if (deepgramConnection !== newDeepgramConnection) return;
                 // Stop forwarding to a closed connection; further audio is held
                 // (capped) rather than sent into a dead socket.
                 deepgramReady = false;
               },
             });
+            deepgramConnection = newDeepgramConnection;
             recordingStartedAt = Date.now();
             deepgramCostFlushInterval = setInterval(recordElapsedDeepgramCost, deps.deepgramCostFlushIntervalMs);
             const recordingPayload = JSON.stringify({ type: 'status', status: 'recording' });
@@ -549,8 +567,16 @@ function handleCaptureConnection(ws: WebSocket, deps: WsServerDeps): void {
       audioByteCount,
       avgBytesPerChunk: audioChunkCount > 0 ? Math.round(audioByteCount / audioChunkCount) : 0,
     });
-    if (deps.session.captureSocket === ws) deps.session.captureSocket = null;
-    deps.session.stop();
+    // A stale socket's close can arrive after its replacement is already live
+    // (e.g. a hard WiFi drop with no RST: the browser reconnects and starts a
+    // new session before the old TCP connection finally times out). Guarding
+    // captureSocket alone used to be enough since isActive only fed one status
+    // string, but session.stop() now also closes the per-session log file via
+    // closeSession() — an unguarded call here would truncate a live session's
+    // log and drop its 409 delete guard the moment the stale close fires.
+    const wasCurrentSocket = deps.session.captureSocket === ws;
+    if (wasCurrentSocket) deps.session.captureSocket = null;
+    if (wasCurrentSocket) deps.session.stop();
     void clearAndDeleteRoleCaches(deps);
     deepgramConnection?.finish();
     resetAudioBuffering();
