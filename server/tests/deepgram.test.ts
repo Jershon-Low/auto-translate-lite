@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractFinalTranscript, createUtteranceRouter } from '../src/deepgram';
+import { extractFinalTranscript, createUtteranceRouter, DEEPGRAM_LIVE_OPTIONS } from '../src/deepgram';
 
 describe('extractFinalTranscript', () => {
   it('returns the transcript when is_final is true and text is non-empty', () => {
@@ -107,5 +107,29 @@ describe('createUtteranceRouter', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(segments).toEqual(['Complete sentence.']);
+  });
+});
+
+describe('DEEPGRAM_LIVE_OPTIONS', () => {
+  it('sets endpointing to 500ms so a breath pause does not end a caption', () => {
+    // Left unset, Deepgram defaults to 10ms: the router flushes on
+    // speech_final, so ordinary breathing split sentences into fragments
+    // (61% of segments were <=3 words on 2026-08-02).
+    expect(DEEPGRAM_LIVE_OPTIONS.endpointing).toBe(500);
+  });
+
+  it('keeps endpointing below utterance_end_ms so the gap detector stays a backstop', () => {
+    // If endpointing reached utterance_end_ms the two mechanisms would
+    // collapse into one and there would be no fallback segmenter.
+    expect(DEEPGRAM_LIVE_OPTIONS.endpointing).toBeLessThan(DEEPGRAM_LIVE_OPTIONS.utterance_end_ms);
+  });
+
+  it('requests interim results, which utterance_end_ms depends on', () => {
+    expect(DEEPGRAM_LIVE_OPTIONS.interim_results).toBe(true);
+  });
+
+  it('keeps the sermon-specific keyterms', () => {
+    expect(DEEPGRAM_LIVE_OPTIONS.keyterm).toContain('Planetshakers');
+    expect(DEEPGRAM_LIVE_OPTIONS.keyterm).toContain('CIEL');
   });
 });

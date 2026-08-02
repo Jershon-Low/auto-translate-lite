@@ -17,6 +17,38 @@ export function extractFinalTranscript(event: DeepgramTranscriptEvent): string |
 
 const DEFAULT_MAX_UTTERANCE_WAIT_MS = 5000;
 
+// Exported so the settings are pinned by a test rather than buried in the
+// connection call — these values interact, and changing one in isolation
+// silently changes how the sermon is segmented.
+//
+// `endpointing` is the one that decides line length. The router below flushes
+// the moment Deepgram sets `speech_final`, and `speech_final` is driven by
+// endpointing — so this value, not `utterance_end_ms`, is what actually cuts
+// the caption. It was previously unset, which meant Deepgram's default of
+// 10ms: a caption ended after a hundredth of a second of quiet, so ordinary
+// breathing split sentences. Measured on the 2026-08-02 service, 61% of
+// segments came out at three words or fewer (median 3).
+//
+// 500ms rides over a breath pause (typically 200-400ms) while still breaking
+// at a real sentence end. It sits below `utterance_end_ms` on purpose: that
+// 1000ms gap detector stays the backstop for when voice activity never
+// resolves, and DEFAULT_MAX_UTTERANCE_WAIT_MS caps a run-on at 5s.
+//
+// Longer segments also mean proportionally fewer LLM round trips — each
+// segment costs a transcription check, a translation, and a translation
+// check — which matters because the publish path was already shedding.
+export const DEEPGRAM_LIVE_OPTIONS = {
+  model: 'nova-3',
+  language: 'en',
+  smart_format: true,
+  interim_results: true,
+  endpointing: 500,
+  utterance_end_ms: 1000,
+  encoding: 'opus',
+  mimetype: 'audio/webm',
+  keyterm: ['Planetshakers', 'CIEL'],
+};
+
 export class UtteranceAccumulator {
   private pieces: string[] = [];
 
@@ -107,16 +139,7 @@ export function createDeepgramConnection(
   callbacks: DeepgramCallbacks
 ): DeepgramConnection {
   const deepgram = createClient(apiKey);
-  const connection = deepgram.listen.live({
-    model: 'nova-3',
-    language: 'en',
-    smart_format: true,
-    interim_results: true,
-    utterance_end_ms: 1000,
-    encoding: 'opus',
-    mimetype: 'audio/webm',
-    keyterm: ['Planetshakers', 'CIEL'],
-  });
+  const connection = deepgram.listen.live(DEEPGRAM_LIVE_OPTIONS);
 
   const router = createUtteranceRouter(callbacks.onFinalSegment);
 
